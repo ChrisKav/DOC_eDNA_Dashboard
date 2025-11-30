@@ -382,6 +382,10 @@ summary_df <- summary_df %>%
 
 # -------------------------------
 # Save for shiny app or downstream use
+# - Now writes a dated file: Data/records_DDMMYY.RDS
 # -------------------------------
-saveRDS(summary_df, "Data/records.rds")
-message("Saved Data/records.rds (rows: ", nrow(summary_df), ")")
+date_suffix <- format(today, "%d%m%y")   # ddmmyy, e.g. 301125 for 2025-11-30
+out_file <- file.path("Data", paste0("records_", date_suffix, ".RDS"))
+
+saveRDS(summary_df, out_file)
+message("Saved ", out_file, " (rows: ", nrow(summary_df), ")")
