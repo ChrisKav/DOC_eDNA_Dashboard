@@ -70,16 +70,29 @@ jobs <- get_wilderdata("jobs", key = key, secret = secret, xapikey = xapikey)
 samples <- get_wilderdata("samples", key = key, secret = secret, xapikey = xapikey)
 taxa <- get_wilderdata("taxa", key = key, secret = secret, xapikey = xapikey)
 
-# records: we request records per job and bind rows
-# Using purrr::possibly to continue on errors and return NULL for failed jobs
-records <- purrr::map_dfr(jobs$JobID, function(jid) {
+# records: fetch per-job into list, harmonise types per-frame, then bind_rows
+records_list <- purrr::map(jobs$JobID, function(jid) {
   tryCatch({
-    get_wilderdata("records", JobID = jid, key = key, secret = secret, xapikey = xapikey)
+    df <- get_wilderdata("records", JobID = jid, key = key, secret = secret, xapikey = xapikey)
+    # Defensive harmonisation: convert logicals & factors to character to avoid bind_rows type conflicts
+    if (is.data.frame(df)) {
+      df <- df %>%
+        mutate(across(where(is.logical), ~ as.character(.x)),
+               across(where(is.factor),  ~ as.character(.x)))
+      # Ensure Rank exists as character column (defensive)
+      if (!"Rank" %in% names(df)) df$Rank <- NA_character_
+      df$Rank <- as.character(df$Rank)
+    }
+    df
   }, error = function(e) {
     warning("Failed to fetch records for JobID: ", jid, " - ", e$message)
-    return(NULL)
+    NULL
   })
 })
+
+# Drop NULLs and bind; this avoids the dplyr::bind_rows class mismatch error
+records_list <- purrr::compact(records_list)
+records <- dplyr::bind_rows(records_list)
 
 # -------------------------------
 # Wilderlab public datasets (S3)
