@@ -1,15 +1,17 @@
 # Optimised & annotated data preparation script for Wilderlab + NZTCS integration
-# - Consolidates repeated code
-# - Uses purrr::map_dfr for API loops
-# - Uses vectorised joins and safer lookups
-# - Improves fuzzy matching with stringdist::amatch
-# - Adds light error handling and recommendations to use env vars for secrets
+# - Reads API keys from a two-column CSV (name,value) by default at Data/wilder_keys.csv
+# - Falls back to environment variables if CSV is missing
+# - Consolidated, safer, and annotated version of your original pipeline
 #
-# Run: source("data_prep_optimized.R") (ensure required packages installed and data paths / env vars set)
+# Keys CSV format expected (two columns, no header required):
+# Column1        Column2
+# Key            your-key-value
+# Secret         your-secret-value
+# xapikey        your-xapikey-value
+#
+# You can override the CSV path by setting the environment variable WILDER_KEYS_FILE.
+# Example: Sys.setenv(WILDER_KEYS_FILE = "path/to/keys.csv")
 
-# -------------------------------
-# Libraries
-# -------------------------------
 suppressPackageStartupMessages({
   library(dplyr)
   library(purrr)
@@ -22,18 +24,34 @@ suppressPackageStartupMessages({
   library(wilderlab)
 })
 
+# small helper used in the script
+`%||%` <- function(a, b) {
+  if (!is.null(a) && !is.na(a) && nzchar(as.character(a))) a else b
+}
+
 # -------------------------------
 # Configuration / secrets
 # -------------------------------
-# It's safer to store API keys in environment variables:
-# Sys.setenv(WILDER_KEY="...", WILDER_SECRET="...", WILDER_XAPIKEY="...")
-key    <- Sys.getenv("WILDER_KEY",    unset = NA_character_)
-secret <- Sys.getenv("WILDER_SECRET", unset = NA_character_)
-xapikey <- Sys.getenv("WILDER_XAPIKEY", unset = NA_character_)
+# Try to read a keys CSV first (two-column layout: name, value). If not present, fall back to env vars.
+keys_file <- Sys.getenv("WILDER_KEYS_FILE", unset = "Data/wilder_keys.csv")
 
-if (is.na(key) || is.na(secret) || is.na(xapikey)) {
-  warning("Wilderlab API keys not set in environment variables (WILDER_KEY / WILDER_SECRET / WILDER_XAPIKEY).",
-          " Set them prior to running to avoid hardcoding secrets.")
+if (file.exists(keys_file)) {
+  keys_df <- read_csv(keys_file, col_names = FALSE, show_col_types = FALSE)
+  if (ncol(keys_df) < 2) stop("Keys CSV must have at least two columns (name, value).")
+  key_names <- tolower(trimws(as.character(keys_df[[1]])))
+  key_values <- trimws(as.character(keys_df[[2]]))
+  kv <- setNames(key_values, key_names)
+  key    <- kv[["key"]]     %||% kv[["api key"]] %||% NA_character_
+  secret <- kv[["secret"]]  %||% kv[["api secret"]] %||% NA_character_
+  xapikey <- kv[["xapikey"]] %||% kv[["x-api-key"]] %||% kv[["x_api_key"]] %||% NA_character_
+} else {
+  # fallbacks to environment variables (useful for CI / servers)
+  key    <- Sys.getenv("WILDER_KEY",    unset = NA_character_)
+  secret <- Sys.getenv("WILDER_SECRET", unset = NA_character_)
+  xapikey <- Sys.getenv("WILDER_XAPIKEY", unset = Sys.getenv("WILDER_X_API_KEY", unset = NA_character_))
+  if (is.na(key) || is.na(secret) || is.na(xapikey)) {
+    warning("Wilderlab API keys not found in CSV or environment variables. Set WILDER_KEYS_FILE or environment variables.")
+  }
 }
 
 today <- Sys.Date()
