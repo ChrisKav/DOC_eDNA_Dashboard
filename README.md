@@ -59,7 +59,7 @@ This README explains what each script does, required dependencies, configuration
 
 ## Requirements
 
-R (tested with R 4.x) and the following CRAN packages:
+R (tested with R 4.5.1) and the following CRAN packages:
 
 - dplyr
 - purrr
