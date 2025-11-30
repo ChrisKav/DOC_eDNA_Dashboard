@@ -232,13 +232,6 @@ Contributions welcome. Please:
 
 ## License
 
-Choose an appropriate license for your project (e.g. MIT). If you want, add a `LICENSE` file to this repo and note it here.
+See MIT License
 
 ---
-
-If you want, I can:
-- Add a short example GitHub Actions workflow for running `get_API_data.R` nightly and storing the dated RDS as an artifact,
-- Modify `get_API_data.R` to also write `Data/records.rds` (unversioned) automatically,
-- Provide a sample `wilder_keys.csv` template file to include in the repo (but DO NOT commit real keys).
-
-Which follow-up would you prefer?  
