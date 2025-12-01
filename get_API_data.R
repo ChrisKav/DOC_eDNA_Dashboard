@@ -271,6 +271,27 @@ setDT(all_samples)
 msg("All samples combined: %d rows", nrow(all_samples))
 
 # ---------- 8) Join sample metadata into all_records_dt using keys (fast data.table join) ----------
+# 1) Inspect current types (optional, for debugging)
+str(all_samples$UID)
+str(all_records_dt$UID)
+
+# 2) Coerce both to character to avoid incompatible join types
+if ("UID" %in% names(all_samples))  all_samples[, UID := as.character(UID)]
+if ("UID" %in% names(all_records_dt)) all_records_dt[, UID := as.character(UID)]
+
+# 3) Set keys (optional but recommended)
+setkey(all_samples, UID)
+setkey(all_records_dt, UID)
+
+# 4) Fast update-join: update all_records_dt in-place using values from all_samples
+# This will only change rows in all_records_dt that have matching UID in all_samples.
+all_records_dt[all_samples, `:=`(
+  Latitude = i.Latitude,
+  Longitude = i.Longitude,
+  ClientSampleID = i.ClientSampleID,
+  Report = i.Report
+), on = "UID"]
+
 msg("Joining sample metadata (coordinates, ClientSampleID) into records...")
 # ensure keys exist
 if (!("UID" %in% names(all_records_dt))) stop("UID column missing from records")
@@ -296,18 +317,53 @@ if (!"TaxID" %in% names(all_records_dt)) {
 unique_taxids <- unique(na.omit(all_records_dt$TaxID))
 msg("Unique TaxIDs to lookup: %d", length(unique_taxids))
 
-# fetch lineages for unique taxids
-lineage_map <- vector("list", length(unique_taxids))
-names(lineage_map) <- unique_taxids
-for (tid in unique_taxids) {
-  lineage_map[[as.character(tid)]] <- fetch_lineage_safe(tid, tdb)
-}
-# helper to extract rank safely
-extract_rank <- function(lin, rank) {
-  if (length(lin) == 0 || is.null(lin)) return(NA_character_)
-  val <- lin[[rank]]
-  if (is.null(val)) NA_character_ else as.character(val)
-}
+# ---- Replace the previous per-row mapping with this robust approach ----
+# unique_taxids is already defined earlier: unique_taxids <- unique(na.omit(all_records_dt$TaxID))
+
+msg("Fetching lineages for unique TaxIDs and building lookup table...")
+
+# Build a list of lineage rows robustly
+lineage_rows <- lapply(unique_taxids, function(tid) {
+  lin <- fetch_lineage_safe(tid, tdb)  # returns list or empty list on failure
+  safe_get <- function(l, rank) {
+    if (is.null(l) || length(l) == 0) return(NA_character_)
+    # l may be a named vector/list; check names first
+    nms <- names(l)
+    if (!is.null(nms) && rank %in% nms) {
+      val <- l[[rank]]
+      return(if (is.null(val)) NA_character_ else as.character(val))
+    }
+    # If not named, try to be defensive and return NA
+    return(NA_character_)
+  }
+  list(
+    TaxID = as.character(tid),
+    phylum = safe_get(lin, "phylum"),
+    class  = safe_get(lin, "class"),
+    order  = safe_get(lin, "order"),
+    family = safe_get(lin, "family"),
+    genus  = safe_get(lin, "genus"),
+    species = safe_get(lin, "species")
+  )
+})
+
+# Combine into a data.table (one row per unique TaxID)
+lineage_dt <- rbindlist(lineage_rows, fill = TRUE)
+# Remove duplicates if any and ensure TaxID is character
+lineage_dt <- unique(lineage_dt, by = "TaxID")
+lineage_dt[, TaxID := as.character(TaxID)]
+
+# Merge lineage_dt into all_records_dt using a left join (keep all records)
+# Ensure all_records_dt$TaxID is character for safe join
+if ("TaxID" %in% names(all_records_dt)) all_records_dt[, TaxID := as.character(TaxID)]
+
+setkey(lineage_dt, TaxID)
+setkey(all_records_dt, TaxID)
+# perform non-equi join: add lineage columns to records (all.x = TRUE semantics)
+all_records_dt <- merge(all_records_dt, lineage_dt, by = "TaxID", all.x = TRUE, sort = FALSE)
+
+msg("Lineage lookup merged: added columns: ", paste(setdiff(names(lineage_dt), "TaxID"), collapse = ", "))
+# ------------------------------------------------------------------------
 # create new columns by mapping back to all_records_dt
 all_records_dt[, phylum := extract_rank(lineage_map[[as.character(TaxID)]], "phylum"), by = seq_len(nrow(all_records_dt))]
 all_records_dt[, class  := extract_rank(lineage_map[[as.character(TaxID)]], "class"),  by = seq_len(nrow(all_records_dt))]
