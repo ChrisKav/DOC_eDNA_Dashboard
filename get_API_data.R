@@ -5,6 +5,11 @@
 # (Adapted from data_prep_optimized.R with fixes to ensure behavior matches the
 #  original dplyr-based script while keeping data.table performance improvements)
 #
+# Key behavioral differences vs earlier optimized version:
+# - Everything fetched from the Wilderlab API is marked as DOC data (DOC_Data = "Yes", Source = "DOC_API")
+# - Everything read from the public S3 CSVs is marked as public (DOC_Data = "No", Source = "Public_S3")
+# - Public S3 rows are retained even if the same UID also appears in the DOC API (so both provenance rows exist)
+#
 # See original header in your code for usage notes.
 #
 
@@ -161,6 +166,8 @@ fetch_records_for_job <- function(jid) {
   if (length(logs)) df[, (logs) := lapply(.SD, as.character), .SDcols = logs]
   # ensure Rank exists
   if (!"Rank" %in% names(df)) df[, Rank := NA_character_]
+  # Mark provenance explicitly
+  df[, Source := "DOC_API"]
   return(df)
 }
 
@@ -185,12 +192,26 @@ public_samples <- tryCatch(fread("http://s3.ap-southeast-2.amazonaws.com/wilderl
 public_records <- tryCatch(fread("http://s3.ap-southeast-2.amazonaws.com/wilderlab.publicdata/records.csv", showProgress = FALSE),
                            error = function(e) { warning("fread public_records failed: ", e$message); as.data.table(read_csv("http://s3.ap-southeast-2.amazonaws.com/wilderlab.publicdata/records.csv")) })
 
+# mark provenance for public data so we can keep them even if UIDs overlap DOC API
+if (nrow(public_samples) > 0) public_samples[, Source := "Public_S3"]
+if (nrow(public_records) > 0) public_records[, Source := "Public_S3"]
+
 # ---------- 5) Combine per-job records fast with rbindlist and harmonise types ----------
 msg("Combining per-job records (rbindlist)...")
 if (length(records_list) == 0) {
   records_dt <- data.table()   # empty
 } else {
   records_dt <- rbindlist(records_list, fill = TRUE, use.names = TRUE)
+}
+
+# ensure records from API are marked as DOC (explicit)
+if (nrow(records_dt) > 0) {
+  records_dt[, DOC_Data := "Yes"]
+  # Source already set in fetch_records_for_job
+} else {
+  # ensure columns exist
+  records_dt[, DOC_Data := character()]
+  records_dt[, Source := character()]
 }
 
 # Convert important columns to consistent types quickly.
@@ -221,7 +242,10 @@ for (c in cols_union) {
   }
 }
 
-# Now rbindlist them
+# mark public_records DOC_Data explicitly as "No" (public)
+if (nrow(public_records) > 0) public_records[, DOC_Data := "No"]
+
+# Now rbindlist them — this retains public rows even when same UID exists in records_dt
 all_records_dt <- rbindlist(list(records_dt, public_records), use.names = TRUE, fill = TRUE)
 msg("All records combined: %d rows", nrow(all_records_dt))
 
@@ -233,6 +257,7 @@ msg("Combine samples...")
 setDT(samples)
 samples[, MakeDataPublic := ifelse(MakeDataPublic == 1, "Private", "Public")]
 samples[, DOC_Data := "Yes"]
+samples[, Source := "DOC_API"]
 samples[, CollectionDate := as.IDate(CollectionDate)]
 samples[, Latitude := suppressWarnings(as.numeric(Latitude))]
 samples[, Longitude := suppressWarnings(as.numeric(Longitude))]
@@ -240,14 +265,13 @@ samples[, Longitude := suppressWarnings(as.numeric(Longitude))]
 setDT(public_samples)
 public_samples[, MakeDataPublic := "Public"]
 public_samples[, DOC_Data := "No"]
+public_samples[, Source := "Public_S3"]
 public_samples[, CollectionDate := as.IDate(CollectionDate)]
 public_samples[, Latitude := suppressWarnings(as.numeric(Latitude))]
 public_samples[, Longitude := suppressWarnings(as.numeric(Longitude))]
 
-# drop public samples already present in DOC samples by UID
-if ("UID" %in% names(public_samples) && "UID" %in% names(samples)) {
-  public_samples <- public_samples[!UID %in% samples$UID]
-}
+# NOTE: We intentionally do NOT drop public_samples that share UID with DOC samples.
+# The requirement is to treat S3 rows as public even if the same UID is present in the DOC API.
 
 all_samples <- rbindlist(list(samples, public_samples), use.names = TRUE, fill = TRUE)
 setDT(all_samples)
@@ -258,24 +282,46 @@ msg("All samples combined: %d rows", nrow(all_samples))
 if ("UID" %in% names(all_samples))  all_samples[, UID := as.character(UID)]
 if ("UID" %in% names(all_records_dt)) all_records_dt[, UID := as.character(UID)]
 
-# Use data.table update-join syntax to copy sample fields into all_records_dt
-# This is the correct, efficient equivalent of merged_records$Latitude <- samples$Latitude[match(...)]
-if ("UID" %in% names(all_samples) && "UID" %in% names(all_records_dt)) {
-  setkey(all_samples, UID)
+# Ensure Source exists in all_records_dt; if missing, attempt to set a default so joins work
+if (!"Source" %in% names(all_records_dt)) all_records_dt[, Source := NA_character_]
+
+# We'll do the join by UID + Source (or SID + Source when available) so that DOC_API records pick up DOC samples,
+# and Public_S3 records pick up the S3 sample rows. This prevents overwriting DOC rows with public sample metadata
+# (and vice versa) when the same UID exists in both sources.
+#
+# First ensure keys exist
+if (!"Source" %in% names(all_samples)) all_samples[, Source := NA_character_]
+
+# set keys for join; prefer joining on UID + Source
+setkeyv(all_samples, c("UID", "Source"))
+setkeyv(all_records_dt, c("UID", "Source"))
+
+# assign-from-i style update-join: i.<col> refers to all_samples' columns (now matched by UID+Source)
+all_records_dt[all_samples, Latitude := i.Latitude, on = .(UID, Source)]
+all_records_dt[all_samples, Longitude := i.Longitude, on = .(UID, Source)]
+all_records_dt[all_samples, ClientSampleID := i.ClientSampleID, on = .(UID, Source)]
+all_records_dt[all_samples, Report := i.Report, on = .(UID, Source)]
+all_records_dt[all_samples, MakeDataPublic := i.MakeDataPublic, on = .(UID, Source)]
+all_records_dt[all_samples, DOC_Data := i.DOC_Data, on = .(UID, Source)]
+
+# For any records that still lack sample metadata (e.g., Source NA or mismatched), fall back to matching by UID only.
+missing_meta_idx <- which(is.na(all_records_dt$ClientSampleID) & !is.na(all_records_dt$UID))
+if (length(missing_meta_idx) > 0 && "UID" %in% names(all_samples)) {
+  # temporary two-table join by UID only for remaining missing metadata
+  tmp_samples <- copy(all_samples)
+  setkey(tmp_samples, UID)
   setkey(all_records_dt, UID)
-  # assign-from-i style update-join: i.<col> refers to all_samples' columns
-  all_records_dt[all_samples, Latitude := i.Latitude, on = "UID"]
-  all_records_dt[all_samples, Longitude := i.Longitude, on = "UID"]
-  all_records_dt[all_samples, ClientSampleID := i.ClientSampleID, on = "UID"]
-  all_records_dt[all_samples, Report := i.Report, on = "UID"]
-} else {
-  # ensure columns exist so downstream code doesn't break
-  for (c in c("Latitude", "Longitude", "ClientSampleID", "Report")) {
-    if (!c %in% names(all_records_dt)) all_records_dt[, (c) := NA_character_]
-  }
+  all_records_dt[tmp_samples, Latitude := fifelse(is.na(Latitude), i.Latitude, Latitude), on = "UID"]
+  all_records_dt[tmp_samples, Longitude := fifelse(is.na(Longitude), i.Longitude, Longitude), on = "UID"]
+  all_records_dt[tmp_samples, ClientSampleID := fifelse(is.na(ClientSampleID), as.character(i.ClientSampleID), ClientSampleID), on = "UID"]
+  all_records_dt[tmp_samples, Report := fifelse(is.na(Report), as.character(i.Report), Report), on = "UID"]
+  all_records_dt[tmp_samples, MakeDataPublic := fifelse(is.na(MakeDataPublic), as.character(i.MakeDataPublic), MakeDataPublic), on = "UID"]
+  all_records_dt[tmp_samples, DOC_Data := fifelse(is.na(DOC_Data), as.character(i.DOC_Data), DOC_Data), on = "UID"]
+  # restore keys to UID+Source for downstream
+  setkeyv(all_records_dt, c("UID", "Source"))
 }
 
-msg("Joined sample metadata (coordinates, ClientSampleID) into records.")
+msg("Joined sample metadata (coordinates, ClientSampleID, DOC_Data, MakeDataPublic, Report) into records.")
 
 # ---------- 9) Add taxonomy lineages (use tdb from taxa and safe per-taxid calls) ----------
 msg("Adding taxonomic lineages (insect::get_lineage) ...")
@@ -310,7 +356,7 @@ lineage_rows <- lapply(unique_taxids, function(tid) {
     class  = safe_get(lin, "class"),
     order  = safe_get(lin, "order"),
     family = safe_get(lin, "family"),
-    genus  = safe_get(lin, "genus"),
+    genus = safe_get(lin, "genus"),
     species = safe_get(lin, "species")
   )
 })
@@ -404,17 +450,19 @@ if (nrow(samples_valid) > 0) {
   samples_valid[, Regional_Council := "None"]
 }
 
-# Attach back to all_records_dt by SID (prefer) or UID (fallback)
+# Attach back to all_records_dt by SID + Source (prefer) or UID + Source (fallback)
+# This keeps provenance consistent: a DOC_API record will pick up DOC_API sample attributes,
+# a Public_S3 record will pick up Public_S3 sample attributes.
 if ("SID" %in% names(all_records_dt) && "SID" %in% names(samples_valid)) {
-  setkey(samples_valid, SID)
-  setkey(all_records_dt, SID)
-  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = "SID"]
-  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = "SID"]
+  setkeyv(samples_valid, c("SID", "Source"))
+  setkeyv(all_records_dt, c("SID", "Source"))
+  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = .(SID, Source)]
+  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = .(SID, Source)]
 } else if ("UID" %in% names(all_records_dt) && "UID" %in% names(samples_valid)) {
-  setkey(samples_valid, UID)
-  setkey(all_records_dt, UID)
-  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = "UID"]
-  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = "UID"]
+  setkeyv(samples_valid, c("UID", "Source"))
+  setkeyv(all_records_dt, c("UID", "Source"))
+  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = .(UID, Source)]
+  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = .(UID, Source)]
 } else {
   if (!"Nga_Awa_Catchment" %in% names(all_records_dt)) all_records_dt[, Nga_Awa_Catchment := NA_character_]
   if (!"Regional_Council" %in% names(all_records_dt)) all_records_dt[, Regional_Council := NA_character_]
@@ -431,7 +479,7 @@ msg("Summarising by Report and TaxID (data.table aggregation)...")
 required_cols <- c("Report", "TaxID", "UID", "Count", "ClientSampleID", "Rank", "Name", "CommonName",
                    "Group", "Latitude", "Longitude", "CollectionDate", "Status", "Category", "ThreatReport",
                    "CollectedBy", "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
-                   "phylum", "class", "order", "family", "genus", "species", "Wilderlab_Sp_name", "species_nztcs")
+                   "phylum", "class", "order", "family", "genus", "species", "Wilderlab_Sp_name", "species_nztcs", "Source")
 for (c in required_cols) if (!c %in% names(all_records_dt)) all_records_dt[, (c) := NA_character_]
 
 DT <- all_records_dt  # working name
