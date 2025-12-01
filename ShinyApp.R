@@ -7,7 +7,7 @@ library(dplyr)         # used in GPKG creation
 library(stringr)       # used to sanitize layer names
 
 # Load and convert to data.table
-merged <- as.data.table(readRDS("records.rds"))
+merged <- as.data.table(readRDS("Data/records.rds"))
 
 # Helper function
 unique_sorted <- function(x) sort(unique(na.omit(x)))

@@ -1,25 +1,10 @@
 #!/usr/bin/env Rscript
 #
-# data_prep_optimized.R
+# get_API_data.R
 #
-# Full data.table-based replacement of the previous pipeline. Designed for large datasets.
-# - Reads Wilderlab credentials from Data/wilder_keys.csv (or environment variables)
-# - Fetches Wilderlab jobs/samples/taxa and per-job records (with retries/backoff)
-# - Reads public S3 CSVs with data.table::fread
-# - Harmonises per-job record schemas and efficiently combines with rbindlist
-# - Uses data.table joins and aggregations for performance
-# - Adds taxonomic lineages (insect::get_lineage) with safe wrapper
-# - Performs fuzzy matching to NZTCS using a unique-values approach
-# - Adds spatial attributes (Nga Awa, Regional Council) using sf on the smaller sample table
-# - Writes Data/records_DDMMYY.RDS and also Data/records.rds (unversioned copy for the Shiny app)
+# (Adapted from data_prep_optimized.R with a bugfix for lineage mapping)
 #
-# Usage:
-#  - Put your keys CSV at Data/wilder_keys.csv (two columns: name,value) or set WILDER_KEYS_FILE env var.
-#  - Ensure Data/NZTCS.xlsx and shapefiles exist at the paths referenced below.
-#  - Run: Rscript data_prep_optimized.R
-#
-# Note: This script prefers data.table for the heavy lifting. It still uses sf/stringdist/insect for
-#       specialized operations.
+# See original header in your code for usage notes.
 #
 
 options(stringsAsFactors = FALSE)
@@ -208,13 +193,10 @@ if (length(records_list) == 0) {
 }
 
 # Convert important columns to consistent types quickly.
-# Choose a small set of columns that frequently have type mismatches and enforce types.
-# Numeric columns:
 num_cols <- intersect(c("Count", "TaxID", "Latitude", "Longitude", "TICIQuantile", "TICINoSeqs"), names(records_dt))
 if (length(num_cols)) {
   for (c in num_cols) records_dt[, (c) := suppressWarnings(as.numeric(get(c)))]
 }
-# Character columns:
 char_cols <- intersect(c("UID", "HID", "ClientSampleID", "Report", "Rank", "Name", "CommonName", "Group"), names(records_dt))
 if (length(char_cols)) records_dt[, (char_cols) := lapply(.SD, as.character), .SDcols = char_cols]
 
@@ -234,7 +216,7 @@ for (c in cols_union) {
     public_records[, (c) := suppressWarnings(as.numeric(get(c)))]
   } else {
     public_records[, (c) := as.character(get(c))]
-    records_dt[, (c) := as.character(get(c))]  # also ensure records_dt char columns are char
+    records_dt[, (c) := as.character(get(c))]
   }
 }
 
@@ -271,20 +253,15 @@ setDT(all_samples)
 msg("All samples combined: %d rows", nrow(all_samples))
 
 # ---------- 8) Join sample metadata into all_records_dt using keys (fast data.table join) ----------
-# 1) Inspect current types (optional, for debugging)
 str(all_samples$UID)
 str(all_records_dt$UID)
 
-# 2) Coerce both to character to avoid incompatible join types
 if ("UID" %in% names(all_samples))  all_samples[, UID := as.character(UID)]
 if ("UID" %in% names(all_records_dt)) all_records_dt[, UID := as.character(UID)]
 
-# 3) Set keys (optional but recommended)
 setkey(all_samples, UID)
 setkey(all_records_dt, UID)
 
-# 4) Fast update-join: update all_records_dt in-place using values from all_samples
-# This will only change rows in all_records_dt that have matching UID in all_samples.
 all_records_dt[all_samples, `:=`(
   Latitude = i.Latitude,
   Longitude = i.Longitude,
@@ -293,11 +270,9 @@ all_records_dt[all_samples, `:=`(
 ), on = "UID"]
 
 msg("Joining sample metadata (coordinates, ClientSampleID) into records...")
-# ensure keys exist
 if (!("UID" %in% names(all_records_dt))) stop("UID column missing from records")
 setkey(all_samples, UID)
 setkey(all_records_dt, UID)
-# left join: bring Latitude/Longitude/ClientSampleID/Report into records
 all_records_dt[, Latitude := all_samples[.SD, i.Latitude, on = "UID"]]
 all_records_dt[, Longitude := all_samples[.SD, i.Longitude, on = "UID"]]
 all_records_dt[, ClientSampleID := all_samples[.SD, i.ClientSampleID, on = "UID"]]
@@ -317,23 +292,17 @@ if (!"TaxID" %in% names(all_records_dt)) {
 unique_taxids <- unique(na.omit(all_records_dt$TaxID))
 msg("Unique TaxIDs to lookup: %d", length(unique_taxids))
 
-# ---- Replace the previous per-row mapping with this robust approach ----
-# unique_taxids is already defined earlier: unique_taxids <- unique(na.omit(all_records_dt$TaxID))
-
 msg("Fetching lineages for unique TaxIDs and building lookup table...")
 
-# Build a list of lineage rows robustly
 lineage_rows <- lapply(unique_taxids, function(tid) {
   lin <- fetch_lineage_safe(tid, tdb)  # returns list or empty list on failure
   safe_get <- function(l, rank) {
     if (is.null(l) || length(l) == 0) return(NA_character_)
-    # l may be a named vector/list; check names first
     nms <- names(l)
     if (!is.null(nms) && rank %in% nms) {
       val <- l[[rank]]
       return(if (is.null(val)) NA_character_ else as.character(val))
     }
-    # If not named, try to be defensive and return NA
     return(NA_character_)
   }
   list(
@@ -347,30 +316,29 @@ lineage_rows <- lapply(unique_taxids, function(tid) {
   )
 })
 
-# Combine into a data.table (one row per unique TaxID)
 lineage_dt <- rbindlist(lineage_rows, fill = TRUE)
-# Remove duplicates if any and ensure TaxID is character
 lineage_dt <- unique(lineage_dt, by = "TaxID")
 lineage_dt[, TaxID := as.character(TaxID)]
 
 # Merge lineage_dt into all_records_dt using a left join (keep all records)
-# Ensure all_records_dt$TaxID is character for safe join
 if ("TaxID" %in% names(all_records_dt)) all_records_dt[, TaxID := as.character(TaxID)]
 
 setkey(lineage_dt, TaxID)
 setkey(all_records_dt, TaxID)
-# perform non-equi join: add lineage columns to records (all.x = TRUE semantics)
 all_records_dt <- merge(all_records_dt, lineage_dt, by = "TaxID", all.x = TRUE, sort = FALSE)
 
-msg("Lineage lookup merged: added columns: ", paste(setdiff(names(lineage_dt), "TaxID"), collapse = ", "))
-# ------------------------------------------------------------------------
-# create new columns by mapping back to all_records_dt
-all_records_dt[, phylum := extract_rank(lineage_map[[as.character(TaxID)]], "phylum"), by = seq_len(nrow(all_records_dt))]
-all_records_dt[, class  := extract_rank(lineage_map[[as.character(TaxID)]], "class"),  by = seq_len(nrow(all_records_dt))]
-all_records_dt[, order  := extract_rank(lineage_map[[as.character(TaxID)]], "order"),  by = seq_len(nrow(all_records_dt))]
-all_records_dt[, family := extract_rank(lineage_map[[as.character(TaxID)]], "family"), by = seq_len(nrow(all_records_dt))]
-all_records_dt[, genus  := extract_rank(lineage_map[[as.character(TaxID)]], "genus"),  by = seq_len(nrow(all_records_dt))]
-all_records_dt[, species := extract_rank(lineage_map[[as.character(TaxID)]], "species"), by = seq_len(nrow(all_records_dt))]
+msg("Lineage lookup merged. Ensuring lineage columns exist...")
+
+# Ensure lineage columns exist (if merge didn't create them for some reason)
+expected_lineage_cols <- c("phylum", "class", "order", "family", "genus", "species")
+for (col in expected_lineage_cols) {
+  if (!col %in% names(all_records_dt)) {
+    all_records_dt[, (col) := NA_character_]
+  } else {
+    # coerce to character and clean whitespace
+    all_records_dt[, (col) := ifelse(is.na(get(col)), NA_character_, str_squish(as.character(get(col))))]
+  }
+}
 
 # ---------- 10) Clean taxa text (normalize capitals etc.) ----------
 msg("Cleaning taxonomy text...")
@@ -379,16 +347,13 @@ all_records_dt[, class  := ifelse(is.na(class),  NA_character_, str_to_title(str
 all_records_dt[, order  := ifelse(is.na(order),  NA_character_, str_to_title(str_squish(as.character(order))))]
 all_records_dt[, family := ifelse(is.na(family), NA_character_, str_to_title(str_squish(as.character(family))))]
 all_records_dt[, genus  := ifelse(is.na(genus),  NA_character_, str_to_title(str_squish(as.character(genus))))]
-# species left as-is after cleaning below
 
-# Apply small synonym recodes (same mapping as earlier)
 class_synonyms <- list("Actinopteri" = "Actinopterygii")
 if ("class" %in% names(all_records_dt)) {
   for (k in names(class_synonyms)) {
     all_records_dt[class == k, class := class_synonyms[[k]]]
   }
 }
-# species synonyms
 if ("species" %in% names(all_records_dt)) {
   all_records_dt[, species := as.character(species)]
   all_records_dt[species == "Galaxias sp. D (Allibone et al., 1996)", species := 'Galaxias "species D"']
@@ -396,48 +361,32 @@ if ("species" %in% names(all_records_dt)) {
 
 # ---------- 11) Fuzzy match species names to NZTCS (efficient unique-based matching) ----------
 msg("Fuzzy matching species names to NZTCS...")
-# ensure columns exist
 all_records_dt[, species_clean := clean_species_names(species)]
-# do unique matching: unique species_clean values from records
 unique_species_clean <- unique(na.omit(all_records_dt$species_clean))
 msg("Unique cleaned species names in records: %d", length(unique_species_clean))
-# build choices: NZTCS species_clean vector
 choices <- nztcs_sp$species_clean
-
-# Use stringdist::amatch on the unique list then map back
-# Use method = "jw" and maxDist tuned; adjust if you want more/less permissive
 max_dist <- 0.12
 matched_choices <- vapply(unique_species_clean, function(x) {
   idx <- stringdist::amatch(x, choices, method = "jw", maxDist = max_dist)
   if (is.na(idx)) NA_character_ else choices[idx]
 }, FUN.VALUE = character(1), USE.NAMES = FALSE)
 
-# build a lookup table and join back
 lookup_dt <- data.table(species_clean = unique_species_clean, matched_species = matched_choices)
-# join into records
 setkey(lookup_dt, species_clean)
 setkey(all_records_dt, species_clean)
 all_records_dt <- lookup_dt[all_records_dt]  # bring matched_species into all_records_dt
 
-# join NZTCS attributes for matched species
-setkey(nztcs_sp, species_clean)
-all_records_dt <- nztcs_sp[all_records_dt, on = "species_clean", nomatch = 0L]    # brings NZTCS columns where matched
-# The join above will drop unmatched rows (nomatch=0). We want to keep all records; do a left join instead:
-# To keep all records and attach NZTCS fields, do:
-# all_records_dt <- all_records_dt[, .SD]  # already has matched_species etc. To attach NZTCS attributes, do safer left join:
+# Attach NZTCS attributes using a left join (keep all records)
 all_records_dt <- merge(all_records_dt, nztcs_sp[, .(species_clean, species_nztcs, Status, Category, BioStatus, ThreatReport, Genus, Family, Order, Class, Phylum)], 
                         by = "species_clean", all.x = TRUE, sort = FALSE)
 
 # ---------- 12) Spatial joins for Nga Awa & Regional Council using sf (convert smaller sample table) ----------
 msg("Spatial joins: Nga Awa catchment and Regional Council (samples-level)...")
-# Only do spatial joins on samples (not all records). all_samples already exists.
-# Read shapefiles (these paths must exist)
 NA_shp_path <- "Data/Nga Awa shapefiles/DOC_NgāAwa_RiverSites_20250122_n14.shp"
 RC_shp_path <- "Data/Regional Council shapefiles/regional-council-2022-generalised.shp"
 NA_polygons <- tryCatch(st_read(NA_shp_path, quiet = TRUE), error = function(e) { stop("Failed to read Nga Awa shapefile: ", e$message) })
 RC_polygons <- tryCatch(st_read(RC_shp_path, quiet = TRUE), error = function(e) { stop("Failed to read Regional Council shapefile: ", e$message) })
 
-# Make a sample-level copy and run spatial joins
 samples_valid <- copy(all_samples)[!is.na(Longitude) & !is.na(Latitude)]
 if (nrow(samples_valid) > 0) {
   samples_sf <- st_as_sf(samples_valid, coords = c("Longitude", "Latitude"), crs = 4167, remove = FALSE)
@@ -455,23 +404,20 @@ if (nrow(samples_valid) > 0) {
   samples_valid[, Regional_Council := "None"]
 }
 
-# Attach back to all_records_dt by SID (we used UID earlier; prefer joining by SID when available)
 if ("SID" %in% names(all_records_dt) && "SID" %in% names(samples_valid)) {
-  setkey(samples_valid, SID)
-  setkey(all_records_dt, SID)
-  all_records_dt[, Nga_Awa_Catchment := samples_valid[.SD, i.Nga_Awa_Catchment, on = "SID"]]
-  all_records_dt[, Regional_Council := samples_valid[.SD, i.Regional_Council, on = "SID"]]
+  # assign-from-i style update-join: i.<col> refers to samples_valid's columns
+  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = "SID"]
+  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = "SID"]
+} else if ("UID" %in% names(all_records_dt) && "UID" %in% names(samples_valid)) {
+  # preferred data.table update-join form using UID as fallback
+  all_records_dt[samples_valid, Nga_Awa_Catchment := i.Nga_Awa_Catchment, on = "UID"]
+  all_records_dt[samples_valid, Regional_Council := i.Regional_Council, on = "UID"]
 } else {
-  # fallback: join by UID matching
-  if ("UID" %in% names(all_records_dt) && "UID" %in% names(samples_valid)) {
-    setkey(samples_valid, UID)
-    setkey(all_records_dt, UID)
-    all_records_dt[, Nga_Awa_Catchment := samples_valid[.SD, i.Nga_Awa_Catchment, on = "UID"]]
-    all_records_dt[, Regional_Council := samples_valid[.SD, i.Regional_Council, on = "UID"]]
-  }
+  # nothing to join; create safe defaults so downstream code doesn't break
+  if (!"Nga_Awa_Catchment" %in% names(all_records_dt)) all_records_dt[, Nga_Awa_Catchment := NA_character_]
+  if (!"Regional_Council" %in% names(all_records_dt)) all_records_dt[, Regional_Council := NA_character_]
 }
 
-# Coerce any remaining important columns to appropriate types
 all_records_dt[, `:=`(
   Latitude = suppressWarnings(as.numeric(Latitude)),
   Longitude = suppressWarnings(as.numeric(Longitude)),
@@ -480,19 +426,16 @@ all_records_dt[, `:=`(
 
 # ---------- 13) Create export summary (efficient data.table aggregation) ----------
 msg("Summarising by Report and TaxID (data.table aggregation)...")
-# Ensure necessary columns exist
 required_cols <- c("Report", "TaxID", "UID", "Count", "ClientSampleID", "Rank", "Name", "CommonName",
                    "Group", "Latitude", "Longitude", "CollectionDate", "Status", "Category", "ThreatReport",
                    "CollectedBy", "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
                    "phylum", "class", "order", "family", "genus", "species", "Wilderlab_Sp_name", "species_nztcs")
 for (c in required_cols) if (!c %in% names(all_records_dt)) all_records_dt[, (c) := NA_character_]
 
-DT <- all_records_dt  # working name
+DT <- all_records_dt
 
-# uid_counts per Report
 uid_counts_dt <- DT[, .(total_UID = uniqueN(UID)), by = Report]
 
-# summary by Report + TaxID
 summary_dt <- DT[, .(
   unique_UID_count = uniqueN(UID),
   UID_list = paste(unique(UID), collapse = "-"),
@@ -523,24 +466,20 @@ summary_dt <- DT[, .(
   NZTC_Sp_name = as.character(first(species_nztcs))
 ), by = .(Report, TaxID)]
 
-# left join uid_counts to compute mean_count
 setkey(uid_counts_dt, Report)
 setkey(summary_dt, Report)
 summary_dt <- uid_counts_dt[summary_dt, on = "Report"]
 summary_dt[, mean_count := sum_count / total_UID]
 
-# reorder/select columns to match previous output
 out_cols <- c("Name", "CommonName", "ClientSampleID", "sum_count", "mean_count",
               "unique_UID_count", "total_UID", "Rank", "Group", "Status", "Category",
               "Latitude", "Longitude", "CollectionDate", "ThreatReport", "CollectedBy",
               "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
               "phylum", "class", "order", "family", "genus", "species",
               "Wilderlab_Sp_name", "NZTC_Sp_name", "TaxID", "Report")
-# Keep only those present
 out_cols <- intersect(out_cols, names(summary_dt))
 setcolorder(summary_dt, out_cols)
 
-# Convert to data.frame / tibble for saving and downstream compatibility
 summary_df <- as.data.frame(summary_dt)
 
 # ---------- 14) Save outputs (dated and unversioned copy for the Shiny app) ----------
@@ -549,7 +488,6 @@ out_file <- file.path("Data", paste0("records_", date_suffix, ".RDS"))
 msg("Saving dated RDS -> ", out_file)
 saveRDS(summary_df, out_file)
 
-# Also save a convenience unversioned file used by the Shiny app
 unversioned <- file.path("Data", "records.rds")
 msg("Saving unversioned RDS -> ", unversioned)
 saveRDS(summary_df, unversioned)
