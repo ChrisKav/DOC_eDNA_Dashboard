@@ -107,20 +107,74 @@ if (!"Sample.Name" %in% names(merged)) {
 if ("Latitude" %in% names(merged)) merged$Latitude <- suppressWarnings(as.numeric(merged$Latitude))
 if ("Longitude" %in% names(merged)) merged$Longitude <- suppressWarnings(as.numeric(merged$Longitude))
 
-# Load spatial helper layers (paths in your original Script.R)
-rec2_path <- "REC2_Layers/River_Lines.shp"
-nga_awa_path <- "Nga Awa shapefiles/DOC_NgāAwa_RiverSites_20250122_n14.shp"
-if (!file.exists(rec2_path)) {
-  warning("REC2 rivers shapefile not found at ", rec2_path, ". Spatial maps will be omitted.")
-  rec2_rivers <- NULL
-} else {
-  rec2_rivers <- st_read(rec2_path, quiet = TRUE)
+# -------------------------
+# Find and load spatial helper layers from Data/ (robust)
+# -------------------------
+find_shapefile <- function(root = "Data", patterns = c()) {
+  if (!dir.exists(root)) return(character(0))
+  shp_files <- list.files(root, pattern = "\\.shp$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  if (length(shp_files) == 0) return(character(0))
+  if (length(patterns) == 0) return(shp_files)
+  # score candidates by matching any of the provided patterns (case-insensitive)
+  scores <- sapply(shp_files, function(p) {
+    fn <- basename(p)
+    sum(sapply(patterns, function(pt) as.integer(grepl(pt, fn, ignore.case = TRUE))))
+  })
+  # prefer files with highest score; if tie, return the first
+  if (all(scores == 0)) return(character(0))
+  shp_files[which.max(scores)]
 }
-if (!file.exists(nga_awa_path)) {
-  warning("Nga Awa shapefile not found at ", nga_awa_path, ". Nga Awa geometry available will be limited.")
-  nga_awa <- NULL
+
+# Try to locate REC2 rivers shapefile
+rec2_candidates <- find_shapefile("Data", patterns = c("river_lines", "rec2", "river_line", "river_lines.shp", "river"))
+rec2_path <- NA_character_
+if (length(rec2_candidates) > 0) {
+  rec2_path <- rec2_candidates[1]
 } else {
-  nga_awa <- st_read(nga_awa_path, quiet = TRUE)
+  # fallback to the original expected path (relative)
+  rec2_path_fallback <- file.path("REC2_Layers", "River_Lines.shp")
+  rec2_path <- if (file.exists(rec2_path_fallback)) rec2_path_fallback else NA_character_
+}
+
+# Try to locate Nga Awa shapefile (names can contain unicode 'ā' or ascii variants)
+nga_candidates <- find_shapefile("Data", patterns = c("ngaa", "ngaawa", "nga_awa", "ngāawa", "DOC_Ng"))
+nga_awa_path <- NA_character_
+if (length(nga_candidates) > 0) {
+  nga_awa_path <- nga_candidates[1]
+} else {
+  nga_awa_path_fallback <- file.path("Nga Awa shapefiles", "DOC_NgāAwa_RiverSites_20250122_n14.shp")
+  nga_awa_path <- if (file.exists(nga_awa_path_fallback)) nga_awa_path_fallback else NA_character_
+}
+
+rec2_rivers <- NULL
+nga_awa <- NULL
+
+if (!is.na(rec2_path) && nzchar(rec2_path) && file.exists(rec2_path)) {
+  message("Reading REC2 rivers shapefile: ", rec2_path)
+  rec2_rivers_try <- tryCatch(st_read(rec2_path, quiet = TRUE), error = function(e) { warning("Failed to read REC2 shapefile: ", e$message); NULL })
+  if (!is.null(rec2_rivers_try)) {
+    rec2_rivers <- tryCatch(st_transform(rec2_rivers_try, 2193), error = function(e) {
+      warning("Failed to transform REC2 to EPSG:2193; proceeding with original CRS: ", e$message)
+      rec2_rivers_try
+    })
+    message("REC2 rivers loaded (rows): ", ifelse(is.null(rec2_rivers), 0, nrow(rec2_rivers)))
+  }
+} else {
+  warning("REC2 rivers shapefile not found. Spatial maps will be omitted for REC2 rivers.")
+}
+
+if (!is.na(nga_awa_path) && nzchar(nga_awa_path) && file.exists(nga_awa_path)) {
+  message("Reading Nga Awa shapefile: ", nga_awa_path)
+  nga_awa_try <- tryCatch(st_read(nga_awa_path, quiet = TRUE), error = function(e) { warning("Failed to read Nga Awa shapefile: ", e$message); NULL })
+  if (!is.null(nga_awa_try)) {
+    nga_awa <- tryCatch(st_transform(nga_awa_try, 2193), error = function(e) {
+      warning("Failed to transform Nga Awa to EPSG:2193; proceeding with original CRS: ", e$message)
+      nga_awa_try
+    })
+    message("Nga Awa shapefile loaded (rows): ", ifelse(is.null(nga_awa), 0, nrow(nga_awa)))
+  }
+} else {
+  warning("Nga Awa shapefile not found. Spatial maps will be omitted or limited.")
 }
 
 # Define taxonomic group lists (same as your Script.R)
@@ -170,7 +224,6 @@ catchments <- sort(unique(na.omit(merged[[catch_col]])))
 if (length(catchments) == 0) stop("No Nga Awa catchments found in the records file.")
 
 # ----- IGNORE 'not_Nga_Awa' catchment (and variants like 'not Nga Awa') -----
-# Remove entries that indicate "not Nga Awa" (case-insensitive) to avoid running analyses
 bad_pattern <- "^not[_ ]?nga[_ ]?awa$"
 filtered_catchments <- catchments[!grepl(bad_pattern, catchments, ignore.case = TRUE) & nzchar(as.character(catchments))]
 removed <- setdiff(catchments, filtered_catchments)
