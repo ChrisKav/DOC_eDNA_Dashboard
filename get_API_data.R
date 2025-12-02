@@ -241,6 +241,11 @@ if ("UID" %in% names(all_records_dt)) all_records_dt[, UID := as.character(UID)]
 if (!"Source" %in% names(all_records_dt)) all_records_dt[, Source := NA_character_]
 if (!"Source" %in% names(all_samples)) all_samples[, Source := NA_character_]
 
+# Ensure CollectionDate column exists in all_samples
+if(!"CollectionDate" %in% names(all_samples)) {
+  all_samples[, CollectionDate := as.IDate(NA)]
+}
+
 # Join by UID+Source first
 setkeyv(all_samples, c("UID", "Source"))
 setkeyv(all_records_dt, c("UID", "Source"))
@@ -250,6 +255,7 @@ all_records_dt[all_samples, ClientSampleID := i.ClientSampleID, on = .(UID, Sour
 all_records_dt[all_samples, Report := i.Report, on = .(UID, Source)]
 all_records_dt[all_samples, MakeDataPublic := i.MakeDataPublic, on = .(UID, Source)]
 all_records_dt[all_samples, DOC_Data := i.DOC_Data, on = .(UID, Source)]
+all_records_dt[all_samples, CollectionDate := i.CollectionDate, on = .(UID, Source)]  # ADD THIS LINE
 
 # fallback join by UID only for missing metadata
 missing_idx <- which(is.na(all_records_dt$ClientSampleID) & !is.na(all_records_dt$UID))
@@ -263,6 +269,7 @@ if (length(missing_idx) > 0 && "UID" %in% names(all_samples)) {
   all_records_dt[tmp_samples, Report := fifelse(is.na(Report), as.character(i.Report), Report), on = "UID"]
   all_records_dt[tmp_samples, MakeDataPublic := fifelse(is.na(MakeDataPublic), as.character(i.MakeDataPublic), MakeDataPublic), on = "UID"]
   all_records_dt[tmp_samples, DOC_Data := fifelse(is.na(DOC_Data), as.character(i.DOC_Data), DOC_Data), on = "UID"]
+  all_records_dt[tmp_samples, CollectionDate := fifelse(is.na(CollectionDate), i.CollectionDate, CollectionDate), on = "UID"]  # ADD THIS LINE
 }
 msg("Sample metadata joined.")
 
