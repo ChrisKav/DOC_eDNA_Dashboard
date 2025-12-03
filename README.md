@@ -1,237 +1,355 @@
-# Wilderlab eDNA Data Processing & Shiny App
+# Wilderlab eDNA Processing & Analysis
 
-This repository contains two main R scripts:
-
-- `get_API_data.R` — Pulls data from the Wilderlab API and public S3, cleans and enriches the data (taxonomy, spatial joins, fuzzy matching to NZTCS), and saves a preprocessed RDS file.
-- `ShinyApp.R` — A Shiny application that loads the preprocessed records RDS file, provides interactive filters, a map preview, and download options (CSV and a GeoPackage with one layer per taxon).
-
-This README explains what each script does, required dependencies, configuration (API keys), how to run them, expected outputs and troubleshooting tips.
-
----
-
-## Table of contents
-
-- [Overview](#overview)
-- [Files](#files)
-- [Requirements](#requirements)
-- [Configuration — API keys](#configuration---api-keys)
-- [Running the data preparation script](#running-the-data-preparation-script)
-- [Running the Shiny app](#running-the-shiny-app)
-- [GeoPackage export (from the app)](#geopackage-export-from-the-app)
-- [Troubleshooting & diagnostics](#troubleshooting--diagnostics)
-- [Development notes & suggestions](#development-notes--suggestions)
-- [License](#license)
-
----
+A comprehensive R-based pipeline for processing Wilderlab eDNA data, conducting community ecological analyses, and exploring biodiversity records interactively.
 
 ## Overview
 
-- `get_API_data.R` is intended to be run periodically (manually or in a scheduled job). It:
-  - Reads Wilderlab credentials (from a CSV or environment variables).
-  - Fetches jobs, samples, taxa and records from the Wilderlab API.
-  - Loads Wilderlab public S3 samples/records.
-  - Harmonises per-job data frames to avoid type conflicts.
-  - Adds taxonomic lineages using `insect::get_lineage`.
-  - Performs fuzzy matching of species names to NZTCS taxonomy.
-  - Adds spatial attributes (Nga Awa catchment, Regional Council) using shapefiles.
-  - Writes an output RDS to `Data/records_DDMMYY.RDS` (dated with ddmmyy, e.g. `records_301125.RDS`).
+This repository provides tools for:
 
-- `ShinyApp.R` is a Shiny app that:
-  - Loads a preprocessed RDS (by default it loads `records.rds` in the working directory).
-  - Provides cascading filters (phylum → class → order → family → genus → species and additional metadata fields).
-  - Shows a preview table and Leaflet map.
-  - Allows downloading the filtered results as CSV.
-  - Provides a button to download a GeoPackage (GPKG) where each selected taxon (at the chosen taxonomic level) is written as a separate layer.
+1. **Data Preparation** - Fetch and harmonize eDNA records from Wilderlab API and public sources, enrich with taxonomy and spatial attributes
+2. **Community Analysis** - Run standardized ecological analyses (NMDS ordination, clustering, indicator species) across multiple taxonomic groups and catchments
+3. **Interactive Exploration** - Filter, visualize, and export biodiversity records through a Shiny web interface
 
 ---
 
-## Files
+## Features
 
-- `get_API_data.R` — main preprocessing script.
-- `ShinyApp.R` — Shiny UI + server script.
-- `Data/` — expected folder with:
-  - `wilder_keys.csv` (recommended; see below).
-  - `NTZCS.xlsx` and necessary shapefiles referenced by the script.
-  - Output records files such as `records_DDMMYY.RDS` (created by `get_API_data.R`).
-- `README.md` — this file.
+### Data Processing (`get_API_data.R`)
+- Fetches records from Wilderlab API (private DOC data) and public S3
+- Enriches taxonomy using NCBI lineages via `insect` package
+- Fuzzy matches species to NZ Threat Classification System (NZTCS)
+- Performs spatial joins to assign Ngā Awa catchments and Regional Council boundaries
+- Produces analysis-ready dataset: `Data/records.rds`
+
+### Community Analysis (`community_analysis_functions.R`, `run_community_analysis.R`)
+- Modular analysis framework supporting multiple community types:
+  - Fish (15 families)
+  - Macroinvertebrates (90+ families)
+  - Macrophytes (10 families)
+  - Diatoms, Ciliates, Rotifers (by phylum)
+- Automated workflows for each Ngā Awa catchment:
+  - NMDS ordination with species vectors
+  - PAM clustering with silhouette optimization
+  - Indicator species analysis (IndVal)
+  - Species frequency heatmaps
+  - Spatial distribution maps
+- Generates publication-ready outputs (PNG figures, Word tables)
+
+### Interactive Viewer (`ShinyApp.R`)
+- Hierarchical taxonomic filters (phylum → species)
+- Conservation status and data provenance filters
+- Interactive map preview with clustering
+- CSV export of filtered records
+- GeoPackage export with taxa-specific layers
 
 ---
 
-## Requirements
+## Installation
 
-R (tested with R 4.5.1) and the following CRAN packages:
+### Prerequisites
 
-- dplyr
-- purrr
-- readr
-- readxl
-- stringr
-- stringdist
-- sf
-- insect
-- wilderlab
-- data.table
-- shiny
-- shinycssloaders
-- leaflet
-
-You can install them with:
-
+**R packages:**
 ```r
 install.packages(c(
-  "dplyr", "purrr", "readr", "readxl", "stringr", "stringdist",
-  "sf", "insect", "wilderlab", "data.table", "shiny",
+  "data.table", "readr", "readxl", "stringr", "stringdist", 
+  "sf", "insect", "wilderlab", "dplyr", "tidyverse", 
+  "vegan", "ggplot2", "ggrepel", "ggnewscale", "cluster", 
+  "factoextra", "ggspatial", "patchwork", "flextable", 
+  "officer", "indicspecies", "pheatmap", "shiny", 
   "shinycssloaders", "leaflet"
 ))
 ```
 
-Note: `sf` may require system libraries (GDAL/GEOS/PROJ). Consult the `sf` installation notes for your OS.
+**System dependencies for `sf` package:**
+- **Ubuntu/Debian:** `sudo apt install libgdal-dev libgeos-dev libproj-dev`
+- **macOS:** `brew install gdal geos proj`
+- **Windows:** Binary packages usually include dependencies
+
+### Setup
+
+1. Clone repository:
+   ```bash
+   git clone https://github.com/yourusername/wilderlab-edna.git
+   cd wilderlab-edna
+   ```
+
+2. Create required directories:
+   ```bash
+   mkdir -p Data Output logs
+   ```
+
+3. Add required data files (see [Data Requirements](#data-requirements))
 
 ---
 
-## Configuration — API keys
+## Data Requirements
 
-The data prep script reads Wilderlab credentials from a simple two-column CSV by default at:
+Place these files in the `Data/` directory:
 
-```
-Data/wilder_keys.csv
-```
+### Essential Files
+- **NZTCS.xlsx** - NZ Threat Classification System spreadsheet (sheet: "Exported Data")
+- **Shapefiles:**
+  - `Nga Awa shapefiles/DOC_NgāAwa_RiverSites_20250122_n14.shp` (+ .shx, .dbf, .prj)
+  - `REC2_Layers/River_Lines.shp` (River Environment Classification v2)
+  - `Regional Council shapefiles/regional-council-2022-generalised.shp`
 
-Expected layout (no header required — the script reads the first two columns):
+### API Credentials (Optional)
 
-Column 1 | Column 2
---- | ---
-Key | your-key-value
-Secret | your-secret-value
-xapikey | your-x-api-key-value
-
-Examples (CSV rows):
-```
-Key,xxxxxxxxxxxxxxxxxxxxxxxxx
-Secret,yyyyyyyyyyyyyyyyyyyyyyyy
-xapikey,zzzzzzzzzzzzzzzzzzzzzzzz
+For accessing DOC private data, create `Data/wilder_keys.csv`:
+```csv
+Key,your_api_key_here
+Secret,your_api_secret_here
+xapikey,your_x_api_key_here
 ```
 
-Alternative: set environment variables (useful for CI or servers)
+**Alternative:** Set environment variables:
+```bash
+export WILDER_KEY="your_api_key"
+export WILDER_SECRET="your_api_secret"
+export WILDER_XAPIKEY="your_x_api_key"
+```
 
-- WILDER_KEYS_FILE — path to an alternative CSV,
-- WILDER_KEY, WILDER_SECRET, WILDER_XAPIKEY (or WILDER_X_API_KEY).
-
-The script will prefer the CSV file if it exists; otherwise it will fall back to environment variables and warn if no keys are found.
+*Note: Public S3 data will be used if credentials are unavailable*
 
 ---
 
-## Running the data preparation script
+## Usage
 
-From an R session or command line:
+### 1. Data Preparation
 
-R interactive:
-```r
-# from project root
-source("get_API_data.R")
-```
+Fetch latest records and create `Data/records.rds`:
 
-Command line with Rscript:
 ```bash
 Rscript get_API_data.R
 ```
 
-Notes:
-- The script expects `Data/NZTCS.xlsx` and shapefiles under `Data/` (see script header for exact filenames).
-- By default the script writes a dated RDS to `Data/records_DDMMYY.RDS` (ddmmyy format). Example: `Data/records_301125.RDS`.
-- If you want the Shiny app to use the newly created dated file, either:
-  - Copy/rename the dated file to the name the app expects (`records.rds`), or
-  - Edit `ShinyApp.R` to load the latest `records_*.RDS` file (a small change to the `readRDS()` call).
+**Expected columns in output:**
+- Sample metadata: `Sample Name`, `Date`, `Latitude`, `Longitude`
+- Taxonomy: `species`, `genus`, `family`, `order`, `class`, `phylum`
+- Conservation: `Threat Status`, `Threat Category`
+- Spatial: `Nga Awa`, `Regional Council`
+- Provenance: `DOC Data` (Yes/No)
 
-Example to create a `records.rds` symlink (on *nix/macOS):
+### 2. Community Analysis
+
+Run analyses for all Ngā Awa catchments:
+
 ```bash
-# find newest and copy
-cp Data/records_$(date +%d%m%y).RDS Data/records.rds
-# or create a symlink
-ln -sf Data/records_$(date +%d%m%y).RDS Data/records.rds
+Rscript run_community_analysis.R
 ```
 
-Windows PowerShell example to copy:
-```powershell
-Copy-Item -Path Data/records_$(Get-Date -Format ddMMyy).RDS -Destination Data/records.rds -Force
+**For detailed logging:**
+```bash
+Rscript run_per_catchment_logged.R
 ```
 
----
+**Debug single catchment:**
+```bash
+Rscript run_per_catchment_logged.R "Arahura River"
+```
 
-## Running the Shiny app
+Outputs saved to: `Output/<Catchment>/<CommunityType>/`
 
-Start the app from command line:
+### 3. Shiny Application
+
+Launch interactive viewer:
 
 ```bash
 Rscript -e "shiny::runApp('ShinyApp.R', port = 8100, launch.browser = TRUE)"
 ```
 
-Or from within R/RStudio:
+Or in RStudio: Open `ShinyApp.R` → Click "Run App"
+
+---
+
+## Output Structure
+
+```
+Output/
+├── Arahura_River/
+│   ├── Fish/
+│   │   ├── 01_Sampling_Effort_by_Year.png
+│   │   ├── 02_Threatened_Species_Summary.png
+│   │   ├── 03_NMDS_Ordination_Plot.png
+│   │   ├── 04_Silhouette_Analysis.png
+│   │   ├── 05_Dendrogram.png
+│   │   ├── 06_Cluster_Summary.docx
+│   │   ├── 07_Species_Frequency_by_Cluster.docx
+│   │   ├── 08_Indicator_Species_Analysis.docx
+│   │   ├── 09_Species_Frequency_Heatmap.png
+│   │   ├── 10_Characteristic_Species_Summary.docx
+│   │   ├── 11_NMDS_Spatial_Gradients.png
+│   │   ├── 12_Sampling_Locations_Map.png
+│   │   └── 13_Cluster_Map.png
+│   ├── Macroinvertebrates/
+│   ├── Macrophytes/
+│   └── ...
+├── Clutha_River/
+└── ...
+
+logs/
+└── run_20250203_143022.log
+```
+
+---
+
+## Workflow Examples
+
+### Complete Analysis Pipeline
+
 ```r
-source("ShinyApp.R")
-# or
+# 1. Fetch and prepare data
+source("get_API_data.R")
+
+# 2. Run all catchment analyses
+source("run_community_analysis.R")
+
+# 3. Launch Shiny app to explore results
 shiny::runApp("ShinyApp.R")
 ```
 
-Important: `ShinyApp.R` expects an RDS file (default `records.rds`) in the working directory. Ensure `Data/records.rds` or `records.rds` is present or change the `readRDS()` path in `ShinyApp.R`.
+### Custom Analysis for Single Community
+
+```r
+source("community_analysis_functions.R")
+
+# Load data
+df <- readRDS("Data/records.rds")
+df_arahura <- df[df$`Nga Awa` == "Arahura River", ]
+
+# Filter to fish
+fish_data <- df_arahura[df_arahura$family %in% fish_families, ]
+
+# Run analysis
+results <- analyze_community(
+  df = df_arahura,
+  community_data = fish_data,
+  community_name = "Fish",
+  output_folder = "Output/Custom/Arahura_Fish",
+  rec2_rivers = NULL,  # Set to NULL to skip maps
+  nga_awa = NULL
+)
+```
 
 ---
 
-## GeoPackage export (from the app)
+## Troubleshooting
 
-The app provides a "Download Geopackage (per-taxon layers)" button and a selector `Create GDB layers grouped by:`. Choose the grouping level (species/genus/family/Latin name etc.) and click the button — the app will:
+### Common Issues
 
-- Group the filtered records by the selected taxon column.
-- Create one layer per taxon in a GeoPackage (*.gpkg).
-- If coordinates are present for records, the layer will be spatial (geometry column using Latitude/Longitude, EPSG:4326). Non-spatial rows (missing coords) are written as attribute tables.
-- Layer names are sanitized for safety (ASCII-only, underscores, trimmed).
+**Missing `records.rds`:**
+```bash
+# Run data preparation first
+Rscript get_API_data.R
+```
 
-Notes / limitations:
-- GeoPackage layer name length and character rules differ by drivers — the script truncates/sanitizes layer names and will disambiguate duplicates by appending suffixes.
-- Large numbers of taxon groups will result in long write times and a large file; use the filters to reduce the export if necessary.
+**Date parsing warnings:**
+- Ensure `Date` column uses ISO format (YYYY-MM-DD)
+- Script handles DD/MM/YYYY and MM/DD/YYYY as fallbacks
+
+**GDAL/sf installation errors:**
+- Ubuntu: `sudo apt install libgdal-dev libgeos-dev libproj-dev`
+- macOS: `brew install gdal`
+- Verify: `sf::sf_extSoftVersion()`
+
+**Empty community analysis:**
+- Check species column names match filter lists
+- Verify catchment name in `Nga Awa` column exactly matches script input
+- Inspect filtering: `sum(df$family %in% fish_families)`
+
+**Memory issues (large catchments):**
+- Process catchments individually using `run_per_catchment_logged.R`
+- Increase R memory limit: `options(java.parameters = "-Xmx8g")`
+
+### Debugging Tools
+
+**Check data structure:**
+```r
+df <- readRDS("Data/records.rds")
+str(df)
+table(df$`Nga Awa`)
+```
+
+**Test single community:**
+```r
+source("community_analysis_functions.R")
+df <- readRDS("Data/records.rds")
+fish <- df[df$family %in% fish_families, ]
+nrow(fish)  # Should be > 0
+```
+
+**Review logs:**
+```bash
+cat logs/run_*.log | grep ERROR
+```
 
 ---
 
-## Troubleshooting & diagnostics
+## Configuration
 
-1. curl / connection issues when fetching API data:
-   - If you see errors like `Recv failure: Connection was reset`, try:
-     - Test with `curl -v https://connect.wilderlab.co.nz` from a terminal to isolate network/TLS issues.
-     - Check proxy/VPN/firewall settings — set `http_proxy` / `https_proxy` in the environment if necessary.
-     - Increase timeouts or retry (you can run the script later if the server is transiently unavailable).
+### Customizing Community Filters
 
-2. Type mismatch when combining per-job data:
-   - The script harmonises types (logical/factor → character) before binding rows. If you add new fields upstream, you may need to extend the harmonisation.
+Edit `community_analysis_functions.R` to modify taxonomic groups:
 
-3. sf / GDAL errors when writing GeoPackage:
-   - Ensure `sf` has been installed with appropriate system dependencies (GDAL/PROJ/GEOS).
-   - If `st_write()` errors with driver issues, check your GDAL/PROJ versions and driver availability.
+```r
+# Add custom fish family
+fish_families <- c(fish_families, "Myxinidae")
 
-4. App cannot find `records.rds`:
-   - Ensure you either copy the dated `records_DDMMYY.RDS` to `records.rds`, change the `readRDS()` path in `ShinyApp.R`, or update the working directory.
+# Define new community
+plankton_orders <- c("Calanoida", "Cyclopoida", "Harpacticoida")
+```
+
+### Adjusting Analysis Parameters
+
+In `analyze_community()` function calls:
+
+```r
+analyze_community(
+  ...,
+  grouping_distance = 200,   # Spatial clustering threshold (m)
+  buffer_distance = 5000     # Map buffer around sites (m)
+)
+```
 
 ---
 
-## Development notes & suggestions
+## Citation
 
-- Consider adding a small step in `get_API_data.R` to always write an unversioned `Data/records.rds` (in addition to the dated file) — this will simplify running `ShinyApp.R` without changes.
-- Add logging (e.g., `logger` package) and caching for API calls to avoid repeated API traffic during development.
-- Add unit tests for core transformations (fuzzy matching, spatial joins).
-- For very large datasets, consider switching heavy grouping operations to `data.table` or using a database backend (PostGIS) for spatial joins and exports.
-- If you need to share credentials securely in CI, prefer environment variables or secret stores rather than checked-in CSV files.
+If using this pipeline in publications, please cite:
+
+- Wilderlab eDNA platform: [https://wilderlab.co.nz](https://wilderlab.co.nz)
+- R packages: `vegan`, `sf`, `indicspecies` (see `citation("package_name")`)
 
 ---
 
 ## Contributing
 
-Contributions welcome. Please:
-- Open an issue to describe the change or bug.
-- Send a PR with clear commit messages and tests (if applicable).
+Contributions welcome! Please:
+1. Fork repository
+2. Create feature branch (`git checkout -b feature/new-analysis`)
+3. Commit changes (`git commit -m 'Add new analysis type'`)
+4. Push to branch (`git push origin feature/new-analysis`)
+5. Open Pull Request
 
 ---
 
 ## License
 
-See MIT License
+[Specify license - e.g., MIT, GPL-3.0]
 
 ---
+
+## Contact
+
+For questions or issues:
+- Open a GitHub issue
+- Email: [your.email@domain.com]
+
+---
+
+## Acknowledgments
+
+- Department of Conservation (DOC) for data access
+- Wilderlab for eDNA processing and API
+- REC2 and LINZ for spatial datasets
+- NZ Threat Classification System contributors
