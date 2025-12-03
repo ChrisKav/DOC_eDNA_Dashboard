@@ -343,7 +343,7 @@ Contributions welcome! Please:
 
 For questions or issues:
 - Open a GitHub issue
-- Email: [your.email@domain.com]
+- Email: [ckavazos@outlook.com]
 
 ---
 
