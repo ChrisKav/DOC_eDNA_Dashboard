@@ -1,183 +1,75 @@
-#!/usr/bin/env Rscript
-#
-# run_nga_awa_by_catchment.R
-#
-# Driver script that:
-#  - loads Data/records.rds (the summary exported by get_API_data.R / previous pipeline)
-#  - normalises column names to the ones expected by analyze_community()
-#  - iterates over each Nga Awa catchment and runs analyses for several taxonomic communities
-#  - writes outputs to Output/<sanitized_NgaAwa>/<CommunityName>/...
-#
-# Usage:
-#  Rscript run_nga_awa_by_catchment.R
-#
+# ============================================================
+# BATCH ANALYSIS FOR ALL NGA AWA CATCHMENTS
+# Runs community analysis for each catchment separately
+# ============================================================
 
-suppressPackageStartupMessages({
-  library(data.table)
-  library(stringr)
-  library(sf)
-  library(dplyr)
-})
+# -----------------------------
+# 0. Load Required Libraries
+# -----------------------------
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+library(sf)
+library(ggrepel)
+library(ggnewscale)
+library(cluster)
+library(factoextra)
+library(ggspatial)
+library(patchwork)
+library(flextable)
+library(officer)
+library(indicspecies)
+library(pheatmap)
 
-# -------------------------
-# Robust script directory detection
-# -------------------------
-cmdargs <- commandArgs(trailingOnly = FALSE)
-file_arg_prefix <- "--file="
-script_path <- NA_character_
+# -----------------------------
+# 1. SOURCE THE ANALYSIS FUNCTION
+# -----------------------------
+# Make sure community_analysis_functions.R contains ONLY the analyze_community function
+# Remove any execution code from the bottom of community_analysis_functions.R before sourcing
+source("community_analysis_functions.R")
 
-i <- grep(file_arg_prefix, cmdargs)
-if (length(i) > 0) {
-  script_path <- sub(file_arg_prefix, "", cmdargs[i][1])
-  script_path <- tryCatch(normalizePath(script_path), error = function(e) NA_character_)
+# -----------------------------
+# 2. LOAD SPATIAL DATA
+# -----------------------------
+cat("\n########## LOADING SPATIAL DATA ##########\n")
+rec2_rivers <- st_read("Data/REC2_Layers/River_Lines.shp") %>% st_transform(2193)
+nga_awa <- st_read("Data/Nga Awa shapefiles/DOC_NgÄAwa_RiverSites_20250122_n14.shp") %>% st_transform(2193)
+cat("Spatial layers loaded successfully\n\n")
+
+# -----------------------------
+# 3. LOAD AND PREPARE DATA
+# -----------------------------
+cat("########## LOADING RECORDS DATA ##########\n")
+df_all <- readRDS("Data/records.rds")
+
+cat("\nColumn names in records.rds:\n")
+print(colnames(df_all))
+cat("\n")
+
+# Convert spaces to dots if needed (to match community_analysis_functions.R format)
+if("Sample Name" %in% colnames(df_all)) {
+  colnames(df_all) <- gsub(" ", ".", colnames(df_all))
+  cat("Converted spaces to dots in column names\n\n")
 }
 
-if (is.na(script_path) || is.null(script_path)) {
-  sf <- sys.frames()
-  if (!is.null(sf) && length(sf) > 0) {
-    for (j in seq_along(sf)) {
-      of <- attr(sf[[j]], "ofile")
-      if (!is.null(of)) {
-        script_path <- tryCatch(normalizePath(of), error = function(e) NA_character_)
-        break
-      }
-    }
-  }
+# Check required columns
+required_cols <- c("Sample.Name", "Nga.Awa", "species", "family", "phylum", 
+                   "Latin.Name", "Threat.Status", "Date", "DOC.Data",
+                   "Latitude", "Longitude")
+
+missing_cols <- setdiff(required_cols, colnames(df_all))
+if(length(missing_cols) > 0) {
+  cat("\nERROR - Missing required columns:\n")
+  cat("  Missing:", paste(missing_cols, collapse = ", "), "\n")
+  cat("  Available:", paste(colnames(df_all), collapse = ", "), "\n\n")
+  stop("Cannot proceed")
 }
 
-if (is.na(script_path) || is.null(script_path)) {
-  warning("Unable to auto-detect script path; using working directory as script_dir. If files are not found, run this script from its directory or set working directory accordingly.")
-  script_dir <- getwd()
-} else {
-  script_dir <- dirname(script_path)
-}
+cat("All required columns present\n\n")
 
-# Source the analysis function (assumes community_analysis_functions.R is in same dir)
-func_path <- file.path(script_dir, "community_analysis_functions.R")
-if (!file.exists(func_path)) {
-  stop("Required file community_analysis_functions.R not found in ", script_dir, ". Place it next to this driver and re-run.")
-}
-source(func_path)
-
-# Load records.rds
-rds_path <- file.path("Data", "records.rds")
-if (!file.exists(rds_path)) stop("Data/records.rds not found. Run get_API_data.R first to create it.")
-merged <- readRDS(rds_path)
-merged <- as_tibble(merged)
-
-# Normalize column names so analyze_community finds expected names
-col_renames <- c(
-  "Sample Name" = "Sample.Name",
-  "Latin Name" = "Latin.Name",
-  "DOC Data" = "DOC.Data",
-  "Threat Status" = "Threat.Status",
-  "Threat Category" = "Threat.Category",
-  "Taxon Group" = "Taxon.Group",
-  "Taxonomic Rank" = "Taxonomic.Rank",
-  "Threat Document" = "Threat.Document",
-  "Nga Awa" = "Nga_Awa",
-  "Nga_Awa_Catchment" = "Nga_Awa",
-  "Regional Council" = "Regional_Council",
-  "Public/Private" = "Public.Private",
-  "Wilderlab Sp Name" = "Wilderlab_Sp_name",
-  "NZTC Sp Name" = "NZTC_Sp_name",
-  "UID" = "UID",
-  "TaxID" = "TaxID",
-  "Latitude" = "Latitude",
-  "Longitude" = "Longitude",
-  "species" = "species",
-  "family" = "family",
-  "phylum" = "phylum",
-  "ClientSampleID" = "ClientSampleID"
-)
-
-for (old in names(col_renames)) {
-  if (old %in% names(merged)) {
-    names(merged)[names(merged) == old] <- col_renames[[old]]
-  }
-}
-
-# Ensure Sample.Name exists (fallback to UID or ClientSampleID)
-if (!"Sample.Name" %in% names(merged)) {
-  if ("UID" %in% names(merged)) merged <- merged %>% mutate(Sample.Name = as.character(UID))
-  else if ("ClientSampleID" %in% names(merged)) merged <- merged %>% mutate(Sample.Name = as.character(ClientSampleID))
-}
-
-# Ensure numeric coords
-if ("Latitude" %in% names(merged)) merged$Latitude <- suppressWarnings(as.numeric(merged$Latitude))
-if ("Longitude" %in% names(merged)) merged$Longitude <- suppressWarnings(as.numeric(merged$Longitude))
-
-# -------------------------
-# Find and load spatial helper layers from Data/ (robust)
-# -------------------------
-find_shapefile <- function(root = "Data", patterns = c()) {
-  if (!dir.exists(root)) return(character(0))
-  shp_files <- list.files(root, pattern = "\\.shp$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
-  if (length(shp_files) == 0) return(character(0))
-  if (length(patterns) == 0) return(shp_files)
-  # score candidates by matching any of the provided patterns (case-insensitive)
-  scores <- sapply(shp_files, function(p) {
-    fn <- basename(p)
-    sum(sapply(patterns, function(pt) as.integer(grepl(pt, fn, ignore.case = TRUE))))
-  })
-  # prefer files with highest score; if tie, return the first
-  if (all(scores == 0)) return(character(0))
-  shp_files[which.max(scores)]
-}
-
-# Try to locate REC2 rivers shapefile
-rec2_candidates <- find_shapefile("Data", patterns = c("river_lines", "rec2", "river_line", "river_lines.shp", "river"))
-rec2_path <- NA_character_
-if (length(rec2_candidates) > 0) {
-  rec2_path <- rec2_candidates[1]
-} else {
-  # fallback to the original expected path (relative)
-  rec2_path_fallback <- file.path("REC2_Layers", "River_Lines.shp")
-  rec2_path <- if (file.exists(rec2_path_fallback)) rec2_path_fallback else NA_character_
-}
-
-# Try to locate Nga Awa shapefile (names can contain unicode 'ā' or ascii variants)
-nga_candidates <- find_shapefile("Data", patterns = c("ngaa", "ngaawa", "nga_awa", "ngāawa", "DOC_Ng"))
-nga_awa_path <- NA_character_
-if (length(nga_candidates) > 0) {
-  nga_awa_path <- nga_candidates[1]
-} else {
-  nga_awa_path_fallback <- file.path("Nga Awa shapefiles", "DOC_NgāAwa_RiverSites_20250122_n14.shp")
-  nga_awa_path <- if (file.exists(nga_awa_path_fallback)) nga_awa_path_fallback else NA_character_
-}
-
-rec2_rivers <- NULL
-nga_awa <- NULL
-
-if (!is.na(rec2_path) && nzchar(rec2_path) && file.exists(rec2_path)) {
-  message("Reading REC2 rivers shapefile: ", rec2_path)
-  rec2_rivers_try <- tryCatch(st_read(rec2_path, quiet = TRUE), error = function(e) { warning("Failed to read REC2 shapefile: ", e$message); NULL })
-  if (!is.null(rec2_rivers_try)) {
-    rec2_rivers <- tryCatch(st_transform(rec2_rivers_try, 2193), error = function(e) {
-      warning("Failed to transform REC2 to EPSG:2193; proceeding with original CRS: ", e$message)
-      rec2_rivers_try
-    })
-    message("REC2 rivers loaded (rows): ", ifelse(is.null(rec2_rivers), 0, nrow(rec2_rivers)))
-  }
-} else {
-  warning("REC2 rivers shapefile not found. Spatial maps will be omitted for REC2 rivers.")
-}
-
-if (!is.na(nga_awa_path) && nzchar(nga_awa_path) && file.exists(nga_awa_path)) {
-  message("Reading Nga Awa shapefile: ", nga_awa_path)
-  nga_awa_try <- tryCatch(st_read(nga_awa_path, quiet = TRUE), error = function(e) { warning("Failed to read Nga Awa shapefile: ", e$message); NULL })
-  if (!is.null(nga_awa_try)) {
-    nga_awa <- tryCatch(st_transform(nga_awa_try, 2193), error = function(e) {
-      warning("Failed to transform Nga Awa to EPSG:2193; proceeding with original CRS: ", e$message)
-      nga_awa_try
-    })
-    message("Nga Awa shapefile loaded (rows): ", ifelse(is.null(nga_awa), 0, nrow(nga_awa)))
-  }
-} else {
-  warning("Nga Awa shapefile not found. Spatial maps will be omitted or limited.")
-}
-
-# Define taxonomic group lists (same as your Script.R)
+# -----------------------------
+# 4. DEFINE COMMUNITY FILTERS
+# -----------------------------
 fish_families <- c("Retropinnidae", "Galaxiidae", "Anguillidae", "Cheimarrichthyidae",
                    "Eleotridae", "Mugilidae", "Tripterygiidae", "Pleuronectidae", 
                    "Microdesmidae", "Gobiidae", "Ictaluridae", "Cyprinidae", 
@@ -207,95 +99,239 @@ diatom_phyla <- c("Bacillariophyta")
 ciliate_phyla <- c("Ciliophora")
 rotifer_phyla <- c("Rotifera")
 
-# Determine unique Nga Awa catchments in the data
-if ("Nga_Awa" %in% names(merged)) {
-  catch_col <- "Nga_Awa"
-} else if ("Nga Awa" %in% names(merged)) {
-  catch_col <- "Nga Awa"
-} else if ("Nga_Awa_Catchment" %in% names(merged)) {
-  catch_col <- "Nga_Awa_Catchment"
-} else if ("Regional_Council" %in% names(merged)) {
-  catch_col <- "Regional_Council"
-} else {
-  stop("No Nga Awa / Regional Council column found in records.rds. Ensure the exported RDS contains Nga Awa catchment info.")
+# -----------------------------
+# 5. IDENTIFY CATCHMENTS
+# -----------------------------
+catchments <- df_all %>%
+  filter(!is.na(Nga.Awa) & Nga.Awa != "not Nga Awa" & Nga.Awa != "") %>%
+  pull(Nga.Awa) %>%
+  unique() %>%
+  sort()
+
+cat(paste0("Found ", length(catchments), " Nga Awa catchments:\n"))
+for(i in seq_along(catchments)) {
+  cat(sprintf("  %2d. %s\n", i, catchments[i]))
 }
+cat("\n")
 
-catchments <- sort(unique(na.omit(merged[[catch_col]])))
-if (length(catchments) == 0) stop("No Nga Awa catchments found in the records file.")
+# Diagnostic check
+cat("Diagnostic check - data availability per catchment:\n")
+cat(sprintf("%-30s %8s %8s %8s\n", "Catchment", "Total", "Fish", "Macroinv"))
+cat(rep("-", 60), "\n", sep = "")
 
-# ----- IGNORE 'not_Nga_Awa' catchment (and variants like 'not Nga Awa') -----
-bad_pattern <- "^not[_ ]?nga[_ ]?awa$"
-filtered_catchments <- catchments[!grepl(bad_pattern, catchments, ignore.case = TRUE) & nzchar(as.character(catchments))]
-removed <- setdiff(catchments, filtered_catchments)
-if (length(removed) > 0) {
-  message("Ignoring catchment entries matching 'not Nga Awa' pattern: ", paste(removed, collapse = ", "))
-}
-catchments <- filtered_catchments
-
-if (length(catchments) == 0) {
-  stop("After filtering out 'not Nga Awa' catchments, no catchments remain to analyze.")
-}
-
-cat("Found", length(catchments), "Nga Awa catchments to process. They are:\n")
-print(catchments)
-
-# Helper to sanitize folder names
-sanitize_folder <- function(x) {
-  nm <- iconv(x, to = "ASCII//TRANSLIT")
-  nm <- str_replace_all(nm, "[^A-Za-z0-9_ -]", "_")
-  nm <- str_trim(nm)
-  nm <- str_replace_all(nm, " ", "_")
-  nm <- substr(nm, 1, 120)
-  if (nchar(nm) == 0) nm <- "unknown"
-  nm
-}
-
-# Loop through catchments
-for (c in catchments) {
-  safe_name <- sanitize_folder(as.character(c))
-  base_out <- file.path("Output", safe_name)
-  cat("\n========================================\nStarting analyses for catchment:", c, "->", base_out, "\n========================================\n")
+for(catchment in catchments) {
+  n_total <- sum(df_all$Nga.Awa == catchment, na.rm = TRUE)
+  n_fish <- sum(df_all$Nga.Awa == catchment & df_all$family %in% fish_families, na.rm = TRUE)
+  n_macro <- sum(df_all$Nga.Awa == catchment & df_all$family %in% macroinvert_families, na.rm = TRUE)
   
-  # Subset merged to this catchment
-  subset_df <- merged %>% filter((!!as.name(catch_col)) == c)
+  cat(sprintf("%-30s %8d %8d %8d\n", catchment, n_total, n_fish, n_macro))
+}
+cat("\n")
+
+# -----------------------------
+# 6. ANALYSIS FUNCTION
+# -----------------------------
+run_catchment_analysis <- function(catchment_name, df_all, 
+                                   rec2_rivers, nga_awa,
+                                   fish_families, macroinvert_families, 
+                                   macrophyte_families, diatom_phyla,
+                                   ciliate_phyla, rotifer_phyla) {
   
-  # If no rows, skip
-  if (nrow(subset_df) == 0) {
-    cat("No records for catchment:", c, " — skipping.\n")
-    next
+  cat("\n")
+  cat(rep("#", 80), "\n", sep = "")
+  cat(sprintf("### %s ###\n", toupper(catchment_name)))
+  cat(rep("#", 80), "\n\n", sep = "")
+  
+  # Filter data
+  df_catchment <- df_all %>% filter(Nga.Awa == catchment_name)
+  
+  if(nrow(df_catchment) == 0) {
+    cat("WARNING: No data - skipping\n")
+    return(NULL)
   }
   
-  # For each community, create community-specific subset and call analyze_community
-  communities <- list(
-    Fish = subset_df %>% filter(family %in% fish_families),
-    Macroinvertebrate = subset_df %>% filter(family %in% macroinvert_families),
-    Macrophytes = subset_df %>% filter(family %in% macrophyte_families),
-    Diatoms = subset_df %>% filter(phylum %in% diatom_phyla),
-    Ciliates = subset_df %>% filter(phylum %in% ciliate_phyla),
-    Rotifers = subset_df %>% filter(phylum %in% rotifer_phyla)
+  cat(sprintf("Processing %d records\n\n", nrow(df_catchment)))
+  
+  # Create output folder
+  catchment_folder <- file.path("Output", gsub("[^A-Za-z0-9_]", "_", catchment_name))
+  if(!dir.exists(catchment_folder)) dir.create(catchment_folder, recursive = TRUE)
+  
+  results <- list()
+  
+  # FISH
+  tryCatch({
+    fish_data <- df_catchment %>% filter(family %in% fish_families)
+    cat(sprintf("Fish: %d records\n", nrow(fish_data)))
+    if(nrow(fish_data) > 0) {
+      results$fish <- analyze_community(
+        df = df_catchment, community_data = fish_data, community_name = "Fish",
+        output_folder = file.path(catchment_folder, "Fish"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  # MACROINVERTEBRATES
+  tryCatch({
+    macro_data <- df_catchment %>% filter(family %in% macroinvert_families)
+    cat(sprintf("Macroinvertebrates: %d records\n", nrow(macro_data)))
+    if(nrow(macro_data) > 0) {
+      results$macroinvert <- analyze_community(
+        df = df_catchment, community_data = macro_data, community_name = "Macroinvertebrate",
+        output_folder = file.path(catchment_folder, "Macroinvertebrates"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  # MACROPHYTES
+  tryCatch({
+    macrophyte_data <- df_catchment %>% filter(family %in% macrophyte_families)
+    cat(sprintf("Macrophytes: %d records\n", nrow(macrophyte_data)))
+    if(nrow(macrophyte_data) > 0) {
+      results$macrophyte <- analyze_community(
+        df = df_catchment, community_data = macrophyte_data, community_name = "Macrophytes",
+        output_folder = file.path(catchment_folder, "Macrophytes"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  # DIATOMS
+  tryCatch({
+    diatom_data <- df_catchment %>% filter(phylum %in% diatom_phyla)
+    cat(sprintf("Diatoms: %d records\n", nrow(diatom_data)))
+    if(nrow(diatom_data) > 0) {
+      results$diatom <- analyze_community(
+        df = df_catchment, community_data = diatom_data, community_name = "Diatoms",
+        output_folder = file.path(catchment_folder, "Diatoms"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  # CILIATES
+  tryCatch({
+    ciliate_data <- df_catchment %>% filter(phylum %in% ciliate_phyla)
+    cat(sprintf("Ciliates: %d records\n", nrow(ciliate_data)))
+    if(nrow(ciliate_data) > 0) {
+      results$ciliate <- analyze_community(
+        df = df_catchment, community_data = ciliate_data, community_name = "Ciliates",
+        output_folder = file.path(catchment_folder, "Ciliates"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  # ROTIFERS
+  tryCatch({
+    rotifer_data <- df_catchment %>% filter(phylum %in% rotifer_phyla)
+    cat(sprintf("Rotifers: %d records\n", nrow(rotifer_data)))
+    if(nrow(rotifer_data) > 0) {
+      results$rotifer <- analyze_community(
+        df = df_catchment, community_data = rotifer_data, community_name = "Rotifers",
+        output_folder = file.path(catchment_folder, "Rotifers"),
+        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+        grouping_distance = 200, buffer_distance = 5000
+      )
+      cat("  -> Complete\n")
+    } else {
+      cat("  -> Skipped (no data)\n")
+    }
+  }, error = function(e) {
+    cat("  -> ERROR:", e$message, "\n")
+  })
+  
+  cat("\n")
+  cat(rep("=", 80), "\n", sep = "")
+  cat(sprintf("COMPLETED: %s\n", toupper(catchment_name)))
+  cat(rep("=", 80), "\n\n", sep = "")
+  
+  return(results)
+}
+
+# -----------------------------
+# 7. RUN ALL ANALYSES
+# -----------------------------
+cat("\n########## STARTING BATCH ANALYSIS ##########\n")
+cat(sprintf("Processing %d catchments\n\n", length(catchments)))
+
+all_results <- list()
+
+for(i in seq_along(catchments)) {
+  catchment <- catchments[i]
+  cat(sprintf("\n[%d/%d] %s\n", i, length(catchments), catchment))
+  
+  all_results[[catchment]] <- run_catchment_analysis(
+    catchment_name = catchment,
+    df_all = df_all,
+    rec2_rivers = rec2_rivers,
+    nga_awa = nga_awa,
+    fish_families = fish_families,
+    macroinvert_families = macroinvert_families,
+    macrophyte_families = macrophyte_families,
+    diatom_phyla = diatom_phyla,
+    ciliate_phyla = ciliate_phyla,
+    rotifer_phyla = rotifer_phyla
   )
-  
-  for (comm_name in names(communities)) {
-    comm_df <- communities[[comm_name]]
-    out_dir <- file.path(base_out, comm_name)
-    if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
-    # call analyze_community wrapped in tryCatch to continue on errors
-    tryCatch({
-      analyze_community(df = subset_df,
-                        community_data = comm_df,
-                        community_name = comm_name,
-                        output_folder = out_dir,
-                        rec2_rivers = rec2_rivers,
-                        nga_awa = nga_awa,
-                        grouping_distance = 200,
-                        buffer_distance = 5000)
-    }, error = function(e) {
-      warning("Analysis failed for catchment=", c, " community=", comm_name, ": ", e$message)
-      writeLines(paste0("ERROR: ", e$message), con = file.path(out_dir, "error.txt"))
-    })
-  }
-  
-  cat("Completed catchment:", c, "\n")
-} # end catchment loop
+}
 
-cat("\nAll catchment runs complete. Outputs under Output/<NgaAwa>/\n")
+# -----------------------------
+# 8. SUMMARY REPORT
+# -----------------------------
+cat("\n")
+cat(rep("#", 80), "\n", sep = "")
+cat("### BATCH ANALYSIS COMPLETE ###\n")
+cat(rep("#", 80), "\n\n", sep = "")
+
+cat("Summary of analyses:\n\n")
+for(catchment in names(all_results)) {
+  cat(sprintf("  %s:\n", catchment))
+  if(!is.null(all_results[[catchment]])) {
+    communities <- names(all_results[[catchment]])
+    if(length(communities) > 0) {
+      cat(sprintf("    - %s\n", paste(communities, collapse = ", ")))
+    } else {
+      cat("    - No communities analyzed\n")
+    }
+  } else {
+    cat("    - Failed or no data\n")
+  }
+}
+
+cat("\nOutputs saved to Output/ folder\n")
+cat("Results object saved to Output/all_catchment_results.RDS\n")
+
+saveRDS(all_results, file = "Output/all_catchment_results.RDS")
+
+cat("\n########## DONE! ##########\n")
