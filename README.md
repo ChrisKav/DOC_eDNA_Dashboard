@@ -349,7 +349,6 @@ For questions or issues:
 
 ## Acknowledgments
 
-- Department of Conservation (DOC) for data access
 - Wilderlab for eDNA processing and API
 - REC2 and LINZ for spatial datasets
 - NZ Threat Classification System contributors
