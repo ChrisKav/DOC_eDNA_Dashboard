@@ -24,6 +24,7 @@ suppressPackageStartupMessages({
   library(insect)
   library(wilderlab)
   library(dplyr)
+  library(wilderlab)
 })
 
 # ---------- Helpers ----------
