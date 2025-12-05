@@ -612,7 +612,7 @@ rotifer_phyla <- c("Rotifera")
 # -----------------------------
 cat("\n########## LOADING SPATIAL DATA ##########\n")
 rec2_rivers <- st_read("Data/REC2_Layers/River_Lines.shp") %>% st_transform(2193)
-nga_awa <- st_read("Data/Nga Awa shapefiles/DOC_NgÄAwa_RiverSites_20250122_n14.shp") %>% st_transform(2193)
+nga_awa <- st_read("Data/Nga Awa shapefiles/DOC_NgāAwa_RiverSites_20250122_n14.shp") %>% st_transform(2193)
 cat("Spatial layers loaded successfully\n")
 
 # -----------------------------
