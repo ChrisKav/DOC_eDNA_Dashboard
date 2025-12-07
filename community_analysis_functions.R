@@ -104,12 +104,11 @@ analyze_community <- function(df,
   # -----------------------------
   cat("Step 2: Analyzing sampling effort...\n")
   
-  # Convert Date to proper date format and extract year
+  # Convert Date to proper date format and extract year (try several common formats)
   sampling_summary <- df %>%
     mutate(
-      # Handle multiple date formats
+      Date = as.character(Date),
       Date = as.Date(Date, format = "%Y-%m-%d"),
-      # If that fails, try other common formats
       Date = if_else(is.na(Date), as.Date(Date, format = "%d/%m/%Y"), Date),
       Date = if_else(is.na(Date), as.Date(Date, format = "%m/%d/%Y"), Date),
       Year = as.numeric(format(Date, "%Y"))
@@ -121,24 +120,20 @@ analyze_community <- function(df,
     summarise(n_samples = n(), .groups = "drop") %>%
     mutate(DOC.Data = factor(DOC.Data, levels = c("DOC", "Non-DOC")))
   
-  # Check if we have valid data
-  if(nrow(sampling_summary) == 0) {
-    cat("  WARNING: No valid date data found. Check Date column format.\n")
-    cat("  Sample of Date column:\n")
-    print(head(df$Date, 10))
-    cat("\n")
-  }
-  
+  # Totals by year
   sampling_totals <- sampling_summary %>%
     group_by(Year) %>%
     summarise(total = sum(n_samples), .groups = "drop")
   
-  # Table
+  # Pivot to wide table and ensure both DOC and Non-DOC columns exist (fill missing with 0)
   sampling_table <- sampling_summary %>%
     pivot_wider(names_from = DOC.Data, values_from = n_samples, values_fill = 0) %>%
+    { if (!"DOC" %in% names(.)) mutate(., DOC = 0) else . } %>%
+    { if (!"Non-DOC" %in% names(.)) mutate(., `Non-DOC` = 0) else . } %>%
     left_join(sampling_totals, by = "Year") %>%
     select(Year, DOC, `Non-DOC`, Total = total)
   
+  # Prepare flextable and plot as before (no change)
   ft_sampling <- sampling_table %>%
     flextable() %>%
     theme_vanilla() %>%
@@ -149,7 +144,10 @@ analyze_community <- function(df,
   save_as_docx(ft_sampling, path = file.path(output_folder, "01_Sampling_Summary_by_Year.docx"))
   
   # Figure
-  sampling_plot <- ggplot(sampling_summary, aes(x = factor(Year), y = n_samples, fill = fct_rev(DOC.Data))) +
+  sampling_plot <- ggplot(
+    sampling_summary %>% mutate(DOC.Data = factor(DOC.Data, levels = c("DOC", "Non-DOC"))),
+    aes(x = factor(Year), y = n_samples, fill = fct_rev(DOC.Data))
+  ) +
     geom_col(color = "black", width = 0.7, linewidth = 0.5) +
     geom_text(data = sampling_totals, aes(x = factor(Year), y = total, label = total, fill = NULL),
               vjust = -0.5, size = 4, fontface = "bold") +
