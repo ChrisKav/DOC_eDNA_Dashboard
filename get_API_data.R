@@ -482,7 +482,7 @@ if (length(existing_old_names) > 0) {
 
 # Ensure presence of all expected Shiny columns
 expected_cols_for_shiny <- c(
-  "Latin Name","Common Name","Sample Name","Total Reads","Average reads","Hit number","Total hits",
+  "Latin Name","Common Name","Sample Name","Total Reads","Average reads","Hit number","Total replicates",
   "Taxonomic Rank","Taxon Group","Threat Status","Threat Category","Date","Threat Document","Collector",
   "DOC Data","Public/Private","Nga Awa","Regional Council","Wilderlab Sp Name","NZTC Sp Name",
   "TaxID","Wilderlab Report","Latitude","Longitude",
