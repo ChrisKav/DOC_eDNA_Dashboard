@@ -457,7 +457,7 @@ rename_map <- c(
   "sum_count" = "Total Reads",
   "mean_count" = "Average reads",
   "unique_UID_count" = "Hit number",
-  "total_UID" = "Total hits",
+  "total_UID" = "Total replicates",
   "Rank" = "Taxonomic Rank",
   "Group" = "Taxon Group",
   "Status" = "Threat Status",
