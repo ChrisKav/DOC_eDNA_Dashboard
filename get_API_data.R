@@ -145,7 +145,7 @@ setDT(samples); setDT(taxa); setDT(jobs)
 if (nrow(samples) > 0) {
   samples[, Source := "DOC_API"]
   samples[, DOC_Data := "Yes"]
-  samples[, MakeDataPublic := ifelse(as.character(MakeDataPublic) == "1" | as.numeric(MakeDataPublic) == 1, "Private", "Public")]
+  samples[, MakeDataPublic := ifelse(as.character(MakeDataPublic) == "1" | as.numeric(MakeDataPublic) == 1, "Public", "Private")]
   samples[, CollectionDate := as.IDate(CollectionDate)]
   samples[, Latitude := suppressWarnings(as.numeric(Latitude))]
   samples[, Longitude := suppressWarnings(as.numeric(Longitude))]
