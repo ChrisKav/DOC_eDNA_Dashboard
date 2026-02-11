@@ -469,7 +469,7 @@ out_cols <- c("Name", "CommonName", "ClientSampleID", "sum_count", "mean_count",
               "Phylum", "Class", "Order", "Family", "Genus", "Species",
               "Wilderlab_Sp_name", "NZTC_Sp_name", "TaxID", "Report")
 out_cols <- intersect(out_cols, names(summary_dt))
-setcolOrder(summary_dt, out_cols)
+setcolorder(summary_dt, out_cols)
 
 summary_df <- as.data.frame(summary_dt)
 
