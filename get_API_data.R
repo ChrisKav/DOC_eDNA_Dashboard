@@ -360,8 +360,8 @@ for (k in names(class_synonyms)) {
 }
 
 # ---------- 9) Fuzzy-match to NZTCS ----------
-msg("Fuzzy matching species names to NZTCS...")
-all_records_dt[, species_clean := clean_species_names(species)]
+msg("Fuzzy matching Species names to NZTCS...")
+all_records_dt[, species_clean := clean_species_names(Species)]
 unique_species_clean <- unique(na.omit(all_records_dt$species_clean))
 choices <- nztcs_sp$species_clean
 max_dist <- 0.12
@@ -369,7 +369,7 @@ matched_choices <- vapply(unique_species_clean, function(x) {
   idx <- stringdist::amatch(x, choices, method = "jw", maxDist = max_dist)
   if (is.na(idx)) NA_character_ else choices[idx]
 }, FUN.VALUE = character(1), USE.NAMES = FALSE)
-lookup_dt <- data.table(species_clean = unique_species_clean, matched_species = matched_choices)
+lookup_dt <- data.table(species_clean = unique_species_clean, matched_Species = matched_choices)
 all_records_dt <- merge(all_records_dt, lookup_dt, by = "species_clean", all.x = TRUE, sort = FALSE)
 all_records_dt <- merge(all_records_dt, nztcs_sp[, .(species_clean, species_nztcs, Status, Category, BioStatus, ThreatReport, Genus, Family, Order, Class, Phylum)], by = "species_clean", all.x = TRUE, sort = FALSE)
 
@@ -421,7 +421,7 @@ msg("Aggregating summary by Report and TaxID...")
 required_cols <- c("Report", "TaxID", "UID", "Count", "ClientSampleID", "Rank", "Name", "CommonName",
                    "Group", "Latitude", "Longitude", "CollectionDate", "Status", "Category", "ThreatReport",
                    "CollectedBy", "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
-                   "phylum", "class", "order", "family", "genus", "species", "Wilderlab_Sp_name", "species_nztcs")
+                   "Phylum", "Class", "Order", "Family", "Genus", "Species", "Wilderlab_Sp_name", "species_nztcs")
 for (c in required_cols) if (!c %in% names(all_records_dt)) all_records_dt[, (c) := NA_character_]
 
 DT <- all_records_dt
@@ -448,12 +448,12 @@ summary_dt <- DT[, .(
   MakeDataPublic = as.character(first(MakeDataPublic)),
   Nga_Awa_Catchment = as.character(first(Nga_Awa_Catchment)),
   Regional_Council = as.character(first(Regional_Council)),
-  phylum = as.character(first(phylum)),
-  class = as.character(first(class)),
-  order = as.character(first(order)),
-  family = as.character(first(family)),
-  genus = as.character(first(genus)),
-  species = as.character(first(species)),
+  Phylum = as.character(first(Phylum)),
+  Class = as.character(first(Class)),
+  Order = as.character(first(Order)),
+  Family = as.character(first(Family)),
+  Genus = as.character(first(Genus)),
+  Species = as.character(first(Species)),
   Wilderlab_Sp_name = as.character(first(Wilderlab_Sp_name)),
   NZTC_Sp_name = as.character(first(species_nztcs))
 ), by = .(Report, TaxID)]
@@ -461,15 +461,15 @@ summary_dt <- DT[, .(
 summary_dt <- merge(summary_dt, uid_counts_dt, by = "Report", all.x = TRUE, sort = FALSE)
 summary_dt[, mean_count := sum_count / total_UID]
 
-# Choose and order columns that will feed into the Shiny app
+# Choose and Order columns that will feed into the Shiny app
 out_cols <- c("Name", "CommonName", "ClientSampleID", "sum_count", "mean_count",
               "unique_UID_count", "total_UID", "Rank", "Group", "Status", "Category",
               "Latitude", "Longitude", "CollectionDate", "ThreatReport", "CollectedBy",
               "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
-              "phylum", "class", "order", "family", "genus", "species",
+              "Phylum", "Class", "Order", "Family", "Genus", "Species",
               "Wilderlab_Sp_name", "NZTC_Sp_name", "TaxID", "Report")
 out_cols <- intersect(out_cols, names(summary_dt))
-setcolorder(summary_dt, out_cols)
+setcolOrder(summary_dt, out_cols)
 
 summary_df <- as.data.frame(summary_dt)
 
@@ -514,7 +514,7 @@ expected_cols_for_shiny <- c(
   "DOC Data","Public/Private","Nga Awa","Regional Council","Wilderlab Sp Name","NZTC Sp Name",
   "TaxID","Wilderlab Report","Latitude","Longitude",
   # also keep the raw taxonomic cols used by filters
-  "phylum","class","order","family","genus","species"
+  "Phylum","Class","Order","Family","Genus","Species"
 )
 missing_cols <- setdiff(expected_cols_for_shiny, names(summary_df))
 if (length(missing_cols) > 0) {
@@ -530,10 +530,10 @@ if ("Longitude" %in% names(summary_df)) summary_df$Longitude <- suppressWarnings
 if ("Total Reads" %in% names(summary_df)) summary_df$`Total Reads` <- suppressWarnings(as.numeric(summary_df$`Total Reads`))
 if ("Average reads" %in% names(summary_df)) summary_df$`Average reads` <- suppressWarnings(as.numeric(summary_df$`Average reads`))
 
-# Set final column order: expected first (for Shiny) then the rest
-preferred_order <- c(intersect(expected_cols_for_shiny, names(summary_df)),
+# Set final column Order: expected first (for Shiny) then the rest
+preferred_Order <- c(intersect(expected_cols_for_shiny, names(summary_df)),
                      setdiff(names(summary_df), expected_cols_for_shiny))
-summary_df <- summary_df[, preferred_order, drop = FALSE]
+summary_df <- summary_df[, preferred_Order, drop = FALSE]
 
 # ---------- 13) Save outputs (dated and unversioned copy for the Shiny app) ----------
 date_suffix <- format(today, "%d%m%y")
