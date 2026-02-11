@@ -274,63 +274,90 @@ if (length(missing_idx) > 0 && "UID" %in% names(all_samples)) {
 }
 msg("Sample metadata joined.")
 
-# ---------- 8) Taxonomy lineage merge using taxa table ----------
-msg("Adding taxonomic lineages (insect::get_lineage)...")
-tdb <- NULL
-if (nrow(taxa) > 0) {
-  tdb <- taxa[, 1:min(4, ncol(taxa)), with = FALSE]
-  newnames <- c("taxID", "parent_taxID", "rank", "name")[1:ncol(tdb)]
-  setnames(tdb, old = names(tdb), new = newnames)
-  tdb[, taxID := suppressWarnings(as.numeric(taxID))]
-}
+# ---------- 8) Taxonomy lineage merge using get_lineages() ----------
+msg("Adding taxonomic lineages using wilderlab::get_lineages()...")
 
-# Ensure TaxID column exists and is CHARACTER in records for safe merging with lineage lookup
-if (!"TaxID" %in% names(all_records_dt)) all_records_dt[, TaxID := NA_character_]
-# Critical fix: coerce TaxID in all_records_dt to character to avoid incompatible join types
-all_records_dt[, TaxID := as.character(TaxID)]
+# Extract unique TaxIDs and ensure they're numeric for get_lineages()
+unique_taxids <- unique(na.omit(as.numeric(all_records_dt$TaxID)))
 
-unique_taxids <- unique(na.omit(all_records_dt$TaxID))
-lineage_rows <- list()
-if (!is.null(tdb) && length(unique_taxids) > 0) {
-  for (tid in unique_taxids) {
-    lin <- tryCatch(fetch_lineage_safe(tid, tdb), error = function(e) list())
-    safe_get <- function(l, rank) {
-      if (is.null(l) || length(l) == 0) return(NA_character_)
-      if (!is.null(names(l)) && rank %in% names(l)) {
-        val <- l[[rank]]
-        return(if (is.null(val)) NA_character_ else as.character(val))
-      }
-      return(NA_character_)
+if (length(unique_taxids) > 0) {
+  tryCatch({
+    # Use the new get_lineages() function from wilderlab
+    lineages <- get_lineages(unique_taxids)
+    lineage_dt <- as.data.table(lineages)
+    
+    # Ensure TaxID column exists and is character in both tables for proper joining
+    if (!"TaxID" %in% names(lineage_dt)) {
+      lineage_dt[, TaxID := as.character(rownames(lineages))]
+    } else {
+      lineage_dt[, TaxID := as.character(TaxID)]
     }
-    lineage_rows[[length(lineage_rows) + 1]] <- list(
-      TaxID = as.character(tid),
-      phylum = safe_get(lin, "phylum"),
-      class  = safe_get(lin, "class"),
-      order  = safe_get(lin, "order"),
-      family = safe_get(lin, "family"),
-      genus = safe_get(lin, "genus"),
-      species = safe_get(lin, "species")
-    )
-  }
+    
+    # Convert TaxID in records to character for consistent merging
+    all_records_dt[, TaxID := as.character(TaxID)]
+    
+    # Merge lineages into records
+    setkey(lineage_dt, TaxID)
+    setkey(all_records_dt, TaxID)
+    all_records_dt <- merge(all_records_dt, lineage_dt, by = "TaxID", all.x = TRUE, sort = FALSE)
+    
+    msg("Lineages merged successfully.")
+  }, error = function(e) {
+    msg("Warning: Failed to retrieve lineages: %s", e$message)
+    msg("Proceeding without lineage data. Contact Wilderlab if taxonomy IDs are not recognized.")
+  })
+} else {
+  msg("No TaxIDs found to retrieve lineages for.")
 }
-lineage_dt <- if (length(lineage_rows) > 0) rbindlist(lineage_rows, fill = TRUE) else data.table(TaxID = character(), phylum = character(), class = character(), order = character(), family = character(), genus = character(), species = character())
-# Defensive: ensure lineage_dt$TaxID is character
-if (nrow(lineage_dt) > 0) lineage_dt[, TaxID := as.character(TaxID)]
 
-# Merge into all_records_dt — both TaxID columns are character so merge will succeed
-setkey(lineage_dt, TaxID); setkey(all_records_dt, TaxID)
-all_records_dt <- merge(all_records_dt, lineage_dt, by = "TaxID", all.x = TRUE, sort = FALSE)
+# Normalize taxa capitalization
+if ("domain" %in% names(all_records_dt)) {
+  all_records_dt[, domain := ifelse(is.na(domain), NA_character_, str_to_title(str_squish(as.character(domain))))]
+}
+if ("phylum" %in% names(all_records_dt)) {
+  all_records_dt[, phylum := ifelse(is.na(phylum), NA_character_, str_to_title(str_squish(as.character(phylum))))]
+}
+if ("class" %in% names(all_records_dt)) {
+  all_records_dt[, class := ifelse(is.na(class), NA_character_, str_to_title(str_squish(as.character(class))))]
+}
+if ("order" %in% names(all_records_dt)) {
+  all_records_dt[, order := ifelse(is.na(order), NA_character_, str_to_title(str_squish(as.character(order))))]
+}
+if ("family" %in% names(all_records_dt)) {
+  all_records_dt[, family := ifelse(is.na(family), NA_character_, str_to_title(str_squish(as.character(family))))]
+}
+if ("genus" %in% names(all_records_dt)) {
+  all_records_dt[, genus := ifelse(is.na(genus), NA_character_, str_to_title(str_squish(as.character(genus))))]
+}
 
-# Normalize taxa capitalization and synonyms
-all_records_dt[, phylum := ifelse(is.na(phylum), NA_character_, str_to_title(str_squish(as.character(phylum))))]
-all_records_dt[, class  := ifelse(is.na(class),  NA_character_, str_to_title(str_squish(as.character(class))))]
-all_records_dt[, order  := ifelse(is.na(order),  NA_character_, str_to_title(str_squish(as.character(order))))]
-all_records_dt[, family := ifelse(is.na(family), NA_character_, str_to_title(str_squish(as.character(family))))]
-all_records_dt[, genus  := ifelse(is.na(genus),  NA_character_, str_to_title(str_squish(as.character(genus))))]
+# After the merge, consolidate the columns
+all_records_dt[, c("Domain.x", "Phylum.x", "Class.x", "Order.x", "Family.x", "Genus.x") := NULL]
+
+# Rename the .y columns to clean names
+setnames(all_records_dt, 
+         old = c("Phylum.y", "Class.y", "Order.y", "Family.y", "Genus.y"),
+         new = c("Phylum", "Class", "Order", "Family", "Genus"))
+
+# Create Species column: use Name when Rank == "species", otherwise NA
+all_records_dt[, Species := fifelse(Rank == "species", Name, NA_character_)]
+
+all_records_dt$Subfamily = NULL
+all_records_dt$Superfamily = NULL
+all_records_dt$species = NULL
+
+# Now your original code will work
 class_synonyms <- list("Actinopteri" = "Actinopterygii")
-for (k in names(class_synonyms)) all_records_dt[class == k, class := class_synonyms[[k]]]
-all_records_dt[, species := as.character(species)]
-all_records_dt[species == "Galaxias sp. D (Allibone et al., 1996)", species := 'Galaxias "species D"']
+for (k in names(class_synonyms)) {
+  all_records_dt[Class == k, Class := class_synonyms[[k]]]
+}
+
+all_records_dt[, Species := as.character(Species)]
+all_records_dt[Species == "Galaxias sp. D (Allibone et al., 1996)", species := 'Galaxias "species D"']
+
+class_synonyms <- list("Actinopteri" = "Actinopterygii")
+for (k in names(class_synonyms)) {
+  all_records_dt[as.character(Class) == k, Class := class_synonyms[[k]]]
+}
 
 # ---------- 9) Fuzzy-match to NZTCS ----------
 msg("Fuzzy matching species names to NZTCS...")
