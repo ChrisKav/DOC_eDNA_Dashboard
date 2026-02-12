@@ -53,7 +53,7 @@ if("Sample Name" %in% colnames(df_all)) {
 }
 
 # Check required columns
-required_cols <- c("Sample.Name", "Nga.Awa", "species", "family", "phylum", 
+required_cols <- c("Sample.Name", "Nga.Awa", "Species", "Family", "Phylum", 
                    "Latin.Name", "Threat.Status", "Date", "DOC.Data",
                    "Latitude", "Longitude")
 
@@ -116,13 +116,14 @@ cat("\n")
 
 # Diagnostic check
 cat("Diagnostic check - data availability per catchment:\n")
+#cat(sprintf("%-30s %8s %8s %8s\n", "Catchment", "Total", "Fish", "Macroinv"))
 cat(sprintf("%-30s %8s %8s %8s\n", "Catchment", "Total", "Fish", "Macroinv"))
 cat(rep("-", 60), "\n", sep = "")
 
 for(catchment in catchments) {
   n_total <- sum(df_all$Nga.Awa == catchment, na.rm = TRUE)
-  n_fish <- sum(df_all$Nga.Awa == catchment & df_all$family %in% fish_families, na.rm = TRUE)
-  n_macro <- sum(df_all$Nga.Awa == catchment & df_all$family %in% macroinvert_families, na.rm = TRUE)
+  n_fish <- sum(df_all$Nga.Awa == catchment & df_all$Family %in% fish_families, na.rm = TRUE)
+  n_macro <- sum(df_all$Nga.Awa == catchment & df_all$Family %in% macroinvert_families, na.rm = TRUE)
   
   cat(sprintf("%-30s %8d %8d %8d\n", catchment, n_total, n_fish, n_macro))
 }
@@ -160,7 +161,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # FISH
   tryCatch({
-    fish_data <- df_catchment %>% filter(family %in% fish_families)
+    fish_data <- df_catchment %>% filter(Family %in% fish_families)
     cat(sprintf("Fish: %d records\n", nrow(fish_data)))
     if(nrow(fish_data) > 0) {
       results$fish <- analyze_community(
@@ -179,7 +180,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # MACROINVERTEBRATES
   tryCatch({
-    macro_data <- df_catchment %>% filter(family %in% macroinvert_families)
+    macro_data <- df_catchment %>% filter(Family %in% macroinvert_families)
     cat(sprintf("Macroinvertebrates: %d records\n", nrow(macro_data)))
     if(nrow(macro_data) > 0) {
       results$macroinvert <- analyze_community(
@@ -198,7 +199,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # MACROPHYTES
   tryCatch({
-    macrophyte_data <- df_catchment %>% filter(family %in% macrophyte_families)
+    macrophyte_data <- df_catchment %>% filter(Family %in% macrophyte_families)
     cat(sprintf("Macrophytes: %d records\n", nrow(macrophyte_data)))
     if(nrow(macrophyte_data) > 0) {
       results$macrophyte <- analyze_community(
@@ -217,7 +218,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # DIATOMS
   tryCatch({
-    diatom_data <- df_catchment %>% filter(phylum %in% diatom_phyla)
+    diatom_data <- df_catchment %>% filter(Phylum %in% diatom_phyla)
     cat(sprintf("Diatoms: %d records\n", nrow(diatom_data)))
     if(nrow(diatom_data) > 0) {
       results$diatom <- analyze_community(
@@ -236,7 +237,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # CILIATES
   tryCatch({
-    ciliate_data <- df_catchment %>% filter(phylum %in% ciliate_phyla)
+    ciliate_data <- df_catchment %>% filter(Phylum %in% ciliate_phyla)
     cat(sprintf("Ciliates: %d records\n", nrow(ciliate_data)))
     if(nrow(ciliate_data) > 0) {
       results$ciliate <- analyze_community(
@@ -255,7 +256,7 @@ run_catchment_analysis <- function(catchment_name, df_all,
   
   # ROTIFERS
   tryCatch({
-    rotifer_data <- df_catchment %>% filter(phylum %in% rotifer_phyla)
+    rotifer_data <- df_catchment %>% filter(Phylum %in% rotifer_phyla)
     cat(sprintf("Rotifers: %d records\n", nrow(rotifer_data)))
     if(nrow(rotifer_data) > 0) {
       results$rotifer <- analyze_community(

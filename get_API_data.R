@@ -535,6 +535,29 @@ preferred_Order <- c(intersect(expected_cols_for_shiny, names(summary_df)),
                      setdiff(names(summary_df), expected_cols_for_shiny))
 summary_df <- summary_df[, preferred_Order, drop = FALSE]
 
+if ("Wilderlab Sp Name" %in% names(summary_df)) {
+  summary_df[["Wilderlab Sp Name"]] <- NULL
+}
+
+# Move 'NZTC Sp Name' after 'species', before 'UID_list'
+col_order <- names(summary_df)
+# Remove 'NZTC Sp Name' from its current position
+col_order <- col_order[col_order != "NZTC Sp Name"]
+# Find indices
+species_idx <- which(col_order == "species")
+# Insert after 'species'
+col_order <- append(col_order, "NZTC Sp Name", after = species_idx)
+# Reorder
+summary_df <- summary_df[, col_order]
+
+# Capitalise taxonomic columns
+tax_cols <- c("phylum", "class", "order", "family", "genus", "species")
+for (col in tax_cols) {
+  if (col %in% names(summary_df)) {
+    names(summary_df)[names(summary_df) == col] <- tools::toTitleCase(col)
+  }
+}
+
 # ---------- 13) Save outputs (dated and unversioned copy for the Shiny app) ----------
 date_suffix <- format(today, "%d%m%y")
 out_file <- file.path("Data", paste0("records_", date_suffix, ".RDS"))

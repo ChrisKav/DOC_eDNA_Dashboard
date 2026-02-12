@@ -54,10 +54,10 @@ analyze_community <- function(df,
   
   # Build presence-absence matrix
   community_matrix <- community_data %>%
-    group_by(Sample.Name, species) %>%
+    group_by(Sample.Name, Species) %>%
     summarise(count = n(), .groups = "drop") %>%
     mutate(presence = 1) %>%
-    pivot_wider(names_from = species, values_from = presence, values_fill = 0) %>%
+    pivot_wider(names_from = Species, values_from = presence, values_fill = 0) %>%
     select(-any_of("NA")) %>%
     right_join(site_coords, by = "Sample.Name") %>%
     mutate(across(where(is.numeric) & !c(Latitude, Longitude), ~replace_na(.x, 0)))
@@ -170,8 +170,8 @@ analyze_community <- function(df,
   cat("Step 3: Analyzing threatened species...\n")
   
   species_threat <- community_data %>%
-    filter(!is.na(species) & species != "") %>%
-    distinct(Latin.Name, species, Threat.Status) %>%
+    filter(!is.na(Species) & Species != "") %>%
+    distinct(Latin.Name, Species, Threat.Status) %>%
     mutate(Threat.Status = case_when(
       is.na(Threat.Status) | Threat.Status == "" ~ "Not Assessed",
       TRUE ~ Threat.Status
@@ -241,7 +241,7 @@ analyze_community <- function(df,
   # Fit species vectors
   species_fit <- envfit(nmds2, species_matrix, permutations = 999)
   species_scores <- as.data.frame(scores(species_fit, "vectors"))
-  species_scores$species <- rownames(species_scores)
+  species_scores$Species <- rownames(species_scores)
   
   # Figure
   nmds_plot <- ggplot(scores_df, aes(x = NMDS1, y = NMDS2)) +
@@ -249,7 +249,7 @@ analyze_community <- function(df,
     geom_text_repel(aes(label = Representative_Site), size = 3, max.overlaps = 20) +
     geom_segment(data = species_scores, aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2),
                  arrow = arrow(length = unit(0.25, "cm")), color = "darkred") +
-    geom_text_repel(data = species_scores, aes(x = NMDS1, y = NMDS2, label = species),
+    geom_text_repel(data = species_scores, aes(x = NMDS1, y = NMDS2, label = Species),
                     color = "darkred", size = 3) +
     theme_minimal(base_size = 14) +
     labs(title = paste("NMDS Ordination of", community_name, "Communities"),

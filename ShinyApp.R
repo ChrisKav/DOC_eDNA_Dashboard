@@ -17,17 +17,17 @@ ui <- fluidPage(
   titlePanel("Biodiversity Records Filter"),
   sidebarLayout(
     sidebarPanel(
-      selectInput("phylum", "Phylum", choices = c("All", unique_sorted(merged$phylum))),
-      selectInput("class", "Class", choices = "All"),
-      selectInput("order", "Order", choices = "All"),
-      selectInput("family", "Family", choices = "All"),
-      selectInput("genus", "Genus", choices = "All"),
-      selectInput("species", "Species", choices = "All"),
+      selectInput("Phylum", "Phylum", choices = c("All", unique_sorted(merged$Phylum))),
+      selectInput("Class", "Class", choices = "All"),
+      selectInput("Order", "Order", choices = "All"),
+      selectInput("Family", "Family", choices = "All"),
+      selectInput("Genus", "Genus", choices = "All"),
+      selectInput("Species", "Species", choices = "All"),
       selectInput("Threat Status", "Threat Status", choices = c("All", unique_sorted(merged$`Threat Status`))),
       selectInput("Threat Category", "Threat Category", choices = c("All", unique_sorted(merged$`Threat Category`))),
       selectInput("Taxon Group", "Taxonomic Group", choices = c("All", unique_sorted(merged$`Taxon Group`))),
       selectInput("Taxonomic Rank", "Taxonomic Rank", choices = c("All", unique_sorted(merged$`Taxonomic Rank`))),
-      selectInput("Threat Document", "Threat Classification Document", choices = c("All", unique_sorted(merged$`Threat Document`))),
+      selectInput("Threat Document", "Threat classification Document", choices = c("All", unique_sorted(merged$`Threat Document`))),
       selectInput("DOC Data", "DOC's Data", choices = c("All", unique_sorted(merged$`DOC Data`))),
       selectInput("Public/Private", "Public/Private", choices = c("All", unique_sorted(merged$`Public/Private`))),
       selectInput("Nga Awa", "Nga Awa catchment", choices = c("All", unique_sorted(merged$`Nga Awa`))),
@@ -41,13 +41,13 @@ ui <- fluidPage(
         "gdb_level",
         "Create GDB layers grouped by:",
         choices = c(
-          "Species" = "species",
-          "Genus" = "genus",
-          "Family" = "family",
+          "Species" = "Species",
+          "Genus" = "Genus",
+          "Family" = "Family",
           "Latin Name" = "Latin Name",
           "Wilderlab Sp Name" = "Wilderlab Sp Name"
         ),
-        selected = "species"
+        selected = "Species"
       ),
       downloadButton("downloadGDB", "Download Geopackage (per-taxon layers)")
     ),
@@ -67,12 +67,12 @@ ui <- fluidPage(
 # Server
 server <- function(input, output, session) {
   observeEvent(input$resetFilters, {
-    updateSelectInput(session, "phylum", selected = "All")
-    updateSelectInput(session, "class", choices = "All", selected = "All")
-    updateSelectInput(session, "order", choices = "All", selected = "All")
-    updateSelectInput(session, "family", choices = "All", selected = "All")
-    updateSelectInput(session, "genus", choices = "All", selected = "All")
-    updateSelectInput(session, "species", choices = "All", selected = "All")
+    updateSelectInput(session, "Phylum", selected = "All")
+    updateSelectInput(session, "Class", choices = "All", selected = "All")
+    updateSelectInput(session, "Order", choices = "All", selected = "All")
+    updateSelectInput(session, "Family", choices = "All", selected = "All")
+    updateSelectInput(session, "Genus", choices = "All", selected = "All")
+    updateSelectInput(session, "Species", choices = "All", selected = "All")
     updateSelectInput(session, "Threat Status", selected = "All")
     updateSelectInput(session, "Threat Category", selected = "All")
     updateSelectInput(session, "Taxon Group", selected = "All")
@@ -84,53 +84,53 @@ server <- function(input, output, session) {
     updateSelectInput(session, "Regional Council", selected = "All")
   })
   
-  observeEvent(input$phylum, {
-    classes <- unique_sorted(merged[phylum == input$phylum | input$phylum == "All", class])
-    updateSelectInput(session, "class", choices = c("All", classes), selected = "All")
-    updateSelectInput(session, "order", choices = "All")
-    updateSelectInput(session, "family", choices = "All")
-    updateSelectInput(session, "genus", choices = "All")
-    updateSelectInput(session, "species", choices = "All")
+  observeEvent(input$Phylum, {
+    classes <- unique_sorted(merged[Phylum == input$Phylum | input$Phylum == "All", Class])
+    updateSelectInput(session, "Class", choices = c("All", classes), selected = "All")
+    updateSelectInput(session, "Order", choices = "All")
+    updateSelectInput(session, "Family", choices = "All")
+    updateSelectInput(session, "Genus", choices = "All")
+    updateSelectInput(session, "Species", choices = "All")
   })
   
-  observeEvent(input$class, {
+  observeEvent(input$Class, {
     orders <- unique_sorted(merged[
-      (phylum == input$phylum | input$phylum == "All") &
-        (class == input$class | input$class == "All"), order])
-    updateSelectInput(session, "order", choices = c("All", orders), selected = "All")
-    updateSelectInput(session, "family", choices = "All")
-    updateSelectInput(session, "genus", choices = "All")
-    updateSelectInput(session, "species", choices = "All")
+      (Phylum == input$Phylum | input$Phylum == "All") &
+        (Class == input$Class | input$Class == "All"), Order])
+    updateSelectInput(session, "Order", choices = c("All", orders), selected = "All")
+    updateSelectInput(session, "Family", choices = "All")
+    updateSelectInput(session, "Genus", choices = "All")
+    updateSelectInput(session, "Species", choices = "All")
   })
   
-  observeEvent(input$order, {
+  observeEvent(input$Order, {
     families <- unique_sorted(merged[
-      (phylum == input$phylum | input$phylum == "All") &
-        (class == input$class | input$class == "All") &
-        (order == input$order | input$order == "All"), family])
-    updateSelectInput(session, "family", choices = c("All", families), selected = "All")
-    updateSelectInput(session, "genus", choices = "All")
-    updateSelectInput(session, "species", choices = "All")
+      (Phylum == input$Phylum | input$Phylum == "All") &
+        (Class == input$Class | input$Class == "All") &
+        (Order == input$Order | input$Order == "All"), Family])
+    updateSelectInput(session, "Family", choices = c("All", families), selected = "All")
+    updateSelectInput(session, "Genus", choices = "All")
+    updateSelectInput(session, "Species", choices = "All")
   })
   
-  observeEvent(input$family, {
+  observeEvent(input$Family, {
     genera <- unique_sorted(merged[
-      (phylum == input$phylum | input$phylum == "All") &
-        (class == input$class | input$class == "All") &
-        (order == input$order | input$order == "All") &
-        (family == input$family | input$family == "All"), genus])
-    updateSelectInput(session, "genus", choices = c("All", genera), selected = "All")
-    updateSelectInput(session, "species", choices = "All")
+      (Phylum == input$Phylum | input$Phylum == "All") &
+        (Class == input$Class | input$Class == "All") &
+        (Order == input$Order | input$Order == "All") &
+        (Family == input$Family | input$Family == "All"), Genus])
+    updateSelectInput(session, "Genus", choices = c("All", genera), selected = "All")
+    updateSelectInput(session, "Species", choices = "All")
   })
   
-  observeEvent(input$genus, {
+  observeEvent(input$Genus, {
     spp <- unique_sorted(merged[
-      (phylum == input$phylum | input$phylum == "All") &
-        (class == input$class | input$class == "All") &
-        (order == input$order | input$order == "All") &
-        (family == input$family | input$family == "All") &
-        (genus == input$genus | input$genus == "All"), species])
-    updateSelectInput(session, "species", choices = c("All", spp), selected = "All")
+      (Phylum == input$Phylum | input$Phylum == "All") &
+        (Class == input$Class | input$Class == "All") &
+        (Order == input$Order | input$Order == "All") &
+        (Family == input$Family | input$Family == "All") &
+        (Genus == input$Genus | input$Genus == "All"), Species])
+    updateSelectInput(session, "Species", choices = c("All", spp), selected = "All")
   })
   
   filtered_data <- reactiveVal()
@@ -138,12 +138,12 @@ server <- function(input, output, session) {
   get_filtered_data <- reactive({
     dt <- copy(merged)
     filters <- list(
-      phylum = input$phylum,
-      class = input$class,
-      order = input$order,
-      family = input$family,
-      genus = input$genus,
-      species = input$species,
+      Phylum = input$Phylum,
+      Class = input$Class,
+      Order = input$Order,
+      Family = input$Family,
+      Genus = input$Genus,
+      Species = input$Species,
       `Threat Status` = input$`Threat Status`,
       `Threat Category` = input$`Threat Category`,
       `Threat Document` = input$`Threat Document`,
@@ -239,7 +239,7 @@ Unique Sample Names:", sample_count
       # if chosen column isn't present, try alternatives
       if (!(group_col %in% available_cols)) {
         # common alternatives tried in order
-        alternatives <- c("Latin Name", "species", "Wilderlab Sp Name", "Wilderlab_Sp_name", "Genus", "genus", "Family", "family")
+        alternatives <- c("Latin Name", "Species", "Wilderlab Sp Name", "Wilderlab_Sp_name", "Genus", "Genus", "Family", "Family")
         found <- intersect(alternatives, available_cols)
         if (length(found) > 0) {
           group_col <- found[[1]]
