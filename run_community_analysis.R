@@ -303,7 +303,7 @@ for(i in seq_along(catchments)) {
     fish_families = fish_families,
     macroinvert_families = macroinvert_families,
     macrophyte_families = macrophyte_families,
-    diatom_phyla = diatom_phyla,
+    diatom_phyla = diatom_phyla#,
 #    ciliate_phyla = ciliate_phyla,
 #    rotifer_phyla = rotifer_phyla
   )
