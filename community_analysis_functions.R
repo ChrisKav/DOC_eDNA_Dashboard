@@ -270,92 +270,122 @@ analyze_community <- function(df,
   dist_matrix <- vegdist(species_matrix, method = "jaccard")
   
   # --- Multi-index cluster number selection ---
-  # Three complementary indices computed over k = 2:10 using fpc::cluster.stats()
-  # on the same Jaccard distance matrix used for PAM.
-  #
-  # Silhouette (ASW)       : mean intra-cluster cohesion vs. nearest-cluster separation.
-  #                          Maximise. Tends to favour compact, well-separated clusters.
-  # Calinski-Harabasz (CH) : between-cluster variance / within-cluster variance (pseudo-F).
-  #                          Maximise. Sensitive to elongated or differently-sized clusters.
-  # Davies-Bouldin (DB)    : average similarity of each cluster to its most similar neighbour.
-  #                          Minimise. Penalises clusters that are large relative to separation.
-  #
-  # Optimal k is chosen by majority vote across the three indices.
-  # If all three disagree, the mean of the three candidates (rounded) is used.
+  # Silhouette (ASW)       : maximise - intra-cluster cohesion vs. nearest-cluster separation
+  # Calinski-Harabasz (CH) : maximise - between/within cluster variance ratio (pseudo-F)
+  # Davies-Bouldin (DB)    : minimise - average similarity of each cluster to nearest neighbour
+  # Optimal k chosen by majority vote; ties resolved by rounded mean.
   
-  k_range   <- 2:10
+  k_range   <- 2:min(10, nrow(species_matrix) - 1)   # can't have k >= n sites
   n_k       <- length(k_range)
-  sil_width <- numeric(n_k)
-  ch_index  <- numeric(n_k)
-  db_index  <- numeric(n_k)
+  sil_width <- rep(NA_real_, n_k)
+  ch_index  <- rep(NA_real_, n_k)
+  db_index  <- rep(NA_real_, n_k)
   
   for (i in seq_along(k_range)) {
-    k       <- k_range[i]
-    pam_fit <- pam(dist_matrix, k = k)
-    cs      <- cluster.stats(dist_matrix, pam_fit$clustering)
-    sil_width[i] <- pam_fit$silinfo$avg.width
-    ch_index[i]  <- cs$ch
-    db_index[i]  <- cs$db
+    k <- k_range[i]
+    pam_fit <- tryCatch(pam(dist_matrix, k = k), error = function(e) NULL)
+    if (is.null(pam_fit)) next
+    
+    sil_val <- tryCatch(pam_fit$silinfo$avg.width, error = function(e) NA_real_)
+    sil_width[i] <- if (is.finite(sil_val)) sil_val else NA_real_
+    
+    cs <- tryCatch(
+      fpc::cluster.stats(dist_matrix, pam_fit$clustering),
+      error = function(e) NULL
+    )
+    if (!is.null(cs)) {
+      ch_val <- tryCatch(cs$ch, error = function(e) NA_real_)
+      db_val <- tryCatch(cs$db, error = function(e) NA_real_)
+      ch_index[i] <- if (!is.null(ch_val) && length(ch_val) == 1 && is.finite(ch_val)) ch_val else NA_real_
+      db_index[i] <- if (!is.null(db_val) && length(db_val) == 1 && is.finite(db_val)) db_val else NA_real_
+    }
   }
   
-  optimal_k_sil <- k_range[which.max(sil_width)]
-  optimal_k_ch  <- k_range[which.max(ch_index)]
-  optimal_k_db  <- k_range[which.min(db_index)]   # lower is better for DB
+  # Determine optimal k per index (ignoring NA values)
+  valid_sil <- !is.na(sil_width)
+  valid_ch  <- !is.na(ch_index)
+  valid_db  <- !is.na(db_index)
   
-  candidates    <- c(optimal_k_sil, optimal_k_ch, optimal_k_db)
-  vote_table    <- sort(table(candidates), decreasing = TRUE)
+  optimal_k_sil <- if (any(valid_sil)) k_range[which.max(sil_width)] else k_range[1]
+  optimal_k_ch  <- if (any(valid_ch))  k_range[which.max(ch_index)]  else k_range[1]
+  optimal_k_db  <- if (any(valid_db))  k_range[which.min(db_index)]  else k_range[1]
   
-  if (vote_table[1] >= 2) {
-    # At least two indices agree
+  candidates <- c(optimal_k_sil, optimal_k_ch, optimal_k_db)
+  vote_table <- sort(table(candidates), decreasing = TRUE)
+  
+  if (as.integer(vote_table[1]) >= 2) {
     optimal_k <- as.integer(names(vote_table)[1])
   } else {
-    # All three differ — use the rounded mean
-    optimal_k <- round(mean(candidates))
+    optimal_k <- as.integer(round(mean(candidates)))
   }
+  # Safety clamp
+  optimal_k <- max(2L, min(optimal_k, nrow(species_matrix) - 1L))
   
   cat(paste0("  - k candidates  ->  Silhouette: ", optimal_k_sil,
              " | Calinski-Harabasz: ", optimal_k_ch,
              " | Davies-Bouldin: ", optimal_k_db, "\n"))
   cat(paste0("  - Optimal clusters (majority vote): ", optimal_k, "\n"))
   
-  # Figure: all three indices on one panel
+  # Scale each index to [0, 1] for plotting; DB is inverted (lower = better)
+  safe_scale <- function(x, invert = FALSE) {
+    x_valid <- x[is.finite(x)]
+    if (length(x_valid) < 2 || diff(range(x_valid)) < 1e-12) {
+      out <- rep(0.5, length(x)); out[!is.finite(x)] <- NA_real_; return(out)
+    }
+    lo <- min(x_valid); hi <- max(x_valid)
+    scaled <- (x - lo) / (hi - lo)
+    if (invert) scaled <- 1 - scaled
+    scaled
+  }
+  
   index_df <- data.frame(
-    k         = rep(k_range, 3),
-    value     = c(sil_width,
-                  # rescale CH and DB to [0,1] for visual comparison
-                  (ch_index  - min(ch_index))  / (max(ch_index)  - min(ch_index) + 1e-9),
-                  1 - (db_index  - min(db_index))  / (max(db_index)  - min(db_index) + 1e-9)),
-    index     = rep(c("Silhouette (maximise)",
-                      "Calinski-Harabasz (maximise, scaled)",
-                      "Davies-Bouldin (minimise, inverted & scaled)"),
-                    each = n_k)
+    k     = rep(k_range, 3),
+    value = c(safe_scale(sil_width),
+              safe_scale(ch_index),
+              safe_scale(db_index, invert = TRUE)),
+    index = rep(c("Silhouette (maximise)",
+                  "Calinski-Harabasz (maximise, scaled)",
+                  "Davies-Bouldin (minimise, inverted & scaled)"),
+                each = n_k)
+  )
+  
+  y_max <- max(index_df$value, na.rm = TRUE)
+  if (!is.finite(y_max)) y_max <- 1
+  
+  subtitle_txt <- paste0(
+    "Silhouette k=", optimal_k_sil,
+    " | C-H k=", optimal_k_ch,
+    " | D-B k=", optimal_k_db,
+    " -> Majority-vote k=", optimal_k
   )
   
   cluster_selection_plot <- ggplot(index_df, aes(x = k, y = value, colour = index)) +
-    geom_line(linewidth = 0.9) +
-    geom_point(size = 2.5) +
-    geom_vline(xintercept = optimal_k, linetype = "dashed", colour = "black", linewidth = 0.8) +
-    annotate("text", x = optimal_k + 0.15, y = max(index_df$value) * 0.97,
+    geom_line(linewidth = 0.9, na.rm = TRUE) +
+    geom_point(size = 2.5, na.rm = TRUE) +
+    geom_vline(xintercept = optimal_k, linetype = "dashed",
+               colour = "black", linewidth = 0.8) +
+    annotate("text", x = optimal_k + 0.15, y = y_max * 0.97,
              label = paste0("k = ", optimal_k), hjust = 0, size = 3.5) +
     scale_x_continuous(breaks = k_range) +
     scale_colour_manual(
-      values = c("Silhouette (maximise)"                        = "#0072B2",
-                 "Calinski-Harabasz (maximise, scaled)"         = "#D55E00",
-                 "Davies-Bouldin (minimise, inverted & scaled)" = "#009E73")
+      values = c(
+        "Silhouette (maximise)"                        = "#0072B2",
+        "Calinski-Harabasz (maximise, scaled)"         = "#D55E00",
+        "Davies-Bouldin (minimise, inverted & scaled)" = "#009E73"
+      )
     ) +
     theme_bw(base_size = 12) +
-    theme(legend.position  = "bottom",
-          legend.title     = element_blank(),
-          plot.title       = element_text(size = 13, face = "bold", hjust = 0.5),
-          plot.subtitle    = element_text(size = 10, hjust = 0.5)) +
+    theme(
+      legend.position  = "bottom",
+      legend.title     = element_blank(),
+      plot.title       = element_text(size = 13, face = "bold", hjust = 0.5),
+      plot.subtitle    = element_text(size = 10, hjust = 0.5)
+    ) +
     labs(
-      title    = paste("Cluster Number Selection –", community_name),
-      subtitle = paste0("Silhouette k=", optimal_k_sil,
-                        " | C-H k=", optimal_k_ch,
-                        " | D-B k=", optimal_k_db,
-                        "  →  Majority-vote k=", optimal_k),
-      x = "Number of clusters (k)",
-      y = "Index value (scaled to [0,1] for comparison)"
+      title    = paste("Cluster Number Selection -", community_name),
+      subtitle = subtitle_txt,
+      x        = "Number of clusters (k)",
+      y        = "Index value (scaled to [0,1])"
     )
   
   ggsave(file.path(output_folder, "04_Cluster_Index_Selection.png"),
@@ -697,10 +727,10 @@ macrophyte_families <- c("Characeae", "Hydatellaceae", "Haloragaceae", "Potamoge
 diatom_phyla <- c("Bacillariophyta")
 
 #Ciliate phylum
-ciliate_phyla <- c("Ciliophora")
+#ciliate_phyla <- c("Ciliophora")
 
 #Rotifer phylum
-rotifer_phyla <- c("Rotifera")
+#rotifer_phyla <- c("Rotifera")
 
 # -----------------------------
 # 3. LOAD SPATIAL DATA (once for all analyses)

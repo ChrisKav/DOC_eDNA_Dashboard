@@ -97,8 +97,8 @@ macrophyte_families <- c("Characeae", "Hydatellaceae", "Haloragaceae", "Potamoge
                          "Nymphaeaceae", "Cyperaceae", "Juncaceae", "Typhaceae", "Polygonaceae")
 
 diatom_phyla <- c("Bacillariophyta")
-ciliate_phyla <- c("Ciliophora")
-rotifer_phyla <- c("Rotifera")
+#ciliate_phyla <- c("Ciliophora")
+#rotifer_phyla <- c("Rotifera")
 
 # -----------------------------
 # 5. IDENTIFY CATCHMENTS
@@ -136,8 +136,9 @@ cat("\n")
 run_catchment_analysis <- function(catchment_name, df_all, 
                                    rec2_rivers, nga_awa,
                                    fish_families, macroinvert_families, 
-                                   macrophyte_families, diatom_phyla,
-                                   ciliate_phyla, rotifer_phyla) {
+                                   macrophyte_families, diatom_phyla#,
+                                   #ciliate_phyla, rotifer_phyla
+                                   ) {
   
   cat("\n")
   cat(rep("#", 80), "\n", sep = "")
@@ -237,42 +238,42 @@ run_catchment_analysis <- function(catchment_name, df_all,
   })
   
   # CILIATES
-  tryCatch({
-    ciliate_data <- df_catchment %>% filter(Phylum %in% ciliate_phyla)
-    cat(sprintf("Ciliates: %d records\n", nrow(ciliate_data)))
-    if(nrow(ciliate_data) > 0) {
-      results$ciliate <- analyze_community(
-        df = df_catchment, community_data = ciliate_data, community_name = "Ciliates",
-        output_folder = file.path(catchment_folder, "Ciliates"),
-        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
-        grouping_distance = 200, buffer_distance = 5000
-      )
-      cat("  -> Complete\n")
-    } else {
-      cat("  -> Skipped (no data)\n")
-    }
-  }, error = function(e) {
-    cat("  -> ERROR:", e$message, "\n")
-  })
+#  tryCatch({
+#    ciliate_data <- df_catchment %>% filter(Phylum %in% ciliate_phyla)
+#    cat(sprintf("Ciliates: %d records\n", nrow(ciliate_data)))
+#    if(nrow(ciliate_data) > 0) {
+#      results$ciliate <- analyze_community(
+#        df = df_catchment, community_data = ciliate_data, community_name = "Ciliates",
+#        output_folder = file.path(catchment_folder, "Ciliates"),
+#        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+#       grouping_distance = 200, buffer_distance = 5000
+#     )
+#      cat("  -> Complete\n")
+#   } else {
+#      cat("  -> Skipped (no data)\n")
+#    }
+# }, error = function(e) {
+#   cat("  -> ERROR:", e$message, "\n")
+#  })
   
-  # ROTIFERS
-  tryCatch({
-    rotifer_data <- df_catchment %>% filter(Phylum %in% rotifer_phyla)
-    cat(sprintf("Rotifers: %d records\n", nrow(rotifer_data)))
-    if(nrow(rotifer_data) > 0) {
-      results$rotifer <- analyze_community(
-        df = df_catchment, community_data = rotifer_data, community_name = "Rotifers",
-        output_folder = file.path(catchment_folder, "Rotifers"),
-        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
-        grouping_distance = 200, buffer_distance = 5000
-      )
-      cat("  -> Complete\n")
-    } else {
-      cat("  -> Skipped (no data)\n")
-    }
-  }, error = function(e) {
-    cat("  -> ERROR:", e$message, "\n")
-  })
+#  # ROTIFERS
+#  tryCatch({
+#    rotifer_data <- df_catchment %>% filter(Phylum %in% rotifer_phyla)
+#    cat(sprintf("Rotifers: %d records\n", nrow(rotifer_data)))
+#    if(nrow(rotifer_data) > 0) {
+#      results$rotifer <- analyze_community(
+#        df = df_catchment, community_data = rotifer_data, community_name = "Rotifers",
+#        output_folder = file.path(catchment_folder, "Rotifers"),
+#        rec2_rivers = rec2_rivers, nga_awa = nga_awa,
+#        grouping_distance = 200, buffer_distance = 5000
+#      )
+#      cat("  -> Complete\n")
+#    } else {
+#      cat("  -> Skipped (no data)\n")
+#    }
+#  }, error = function(e) {
+#    cat("  -> ERROR:", e$message, "\n")
+#  })
   
   cat("\n")
   cat(rep("=", 80), "\n", sep = "")
@@ -303,8 +304,8 @@ for(i in seq_along(catchments)) {
     macroinvert_families = macroinvert_families,
     macrophyte_families = macrophyte_families,
     diatom_phyla = diatom_phyla,
-    ciliate_phyla = ciliate_phyla,
-    rotifer_phyla = rotifer_phyla
+#    ciliate_phyla = ciliate_phyla,
+#    rotifer_phyla = rotifer_phyla
   )
 }
 
