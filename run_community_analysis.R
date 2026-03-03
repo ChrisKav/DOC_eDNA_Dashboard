@@ -20,6 +20,7 @@ library(flextable)
 library(officer)
 library(indicspecies)
 library(pheatmap)
+library(fpc)
 
 # -----------------------------
 # 1. SOURCE THE ANALYSIS FUNCTION

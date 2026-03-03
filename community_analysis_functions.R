@@ -20,6 +20,7 @@ library(flextable)
 library(officer)
 library(indicspecies)
 library(pheatmap)
+library(fpc)
 
 # -----------------------------
 # 1. MAIN ANALYSIS FUNCTION
@@ -58,7 +59,7 @@ analyze_community <- function(df,
     summarise(count = n(), .groups = "drop") %>%
     mutate(presence = 1) %>%
     pivot_wider(names_from = Species, values_from = presence, values_fill = 0) %>%
-    select(-any_of("NA")) %>%
+    select(-any_of(c("NA", "count"))) %>%
     right_join(site_coords, by = "Sample.Name") %>%
     mutate(across(where(is.numeric) & !c(Latitude, Longitude), ~replace_na(.x, 0)))
   
@@ -92,7 +93,8 @@ analyze_community <- function(df,
   
   # Prepare species matrix
   species_matrix <- filtered_matrix %>%
-    select(-group_id, -Sample.Name, -Representative_Site, -Latitude, -Longitude, -Richness) %>%
+    select(-group_id, -Sample.Name, -Representative_Site, -Latitude, -Longitude, -Richness,
+           -any_of("count")) %>%
     as.data.frame()
   rownames(species_matrix) <- filtered_matrix$Representative_Site
   
@@ -267,29 +269,124 @@ analyze_community <- function(df,
   
   dist_matrix <- vegdist(species_matrix, method = "jaccard")
   
-  # Silhouette analysis
-  sil_width <- numeric(9)
-  for(k in 2:10) {
+  # --- Multi-index cluster number selection ---
+  # Three complementary indices computed over k = 2:10 using fpc::cluster.stats()
+  # on the same Jaccard distance matrix used for PAM.
+  #
+  # Silhouette (ASW)       : mean intra-cluster cohesion vs. nearest-cluster separation.
+  #                          Maximise. Tends to favour compact, well-separated clusters.
+  # Calinski-Harabasz (CH) : between-cluster variance / within-cluster variance (pseudo-F).
+  #                          Maximise. Sensitive to elongated or differently-sized clusters.
+  # Davies-Bouldin (DB)    : average similarity of each cluster to its most similar neighbour.
+  #                          Minimise. Penalises clusters that are large relative to separation.
+  #
+  # Optimal k is chosen by majority vote across the three indices.
+  # If all three disagree, the mean of the three candidates (rounded) is used.
+  
+  k_range   <- 2:10
+  n_k       <- length(k_range)
+  sil_width <- numeric(n_k)
+  ch_index  <- numeric(n_k)
+  db_index  <- numeric(n_k)
+  
+  for (i in seq_along(k_range)) {
+    k       <- k_range[i]
     pam_fit <- pam(dist_matrix, k = k)
-    sil_width[k-1] <- pam_fit$silinfo$avg.width
+    cs      <- cluster.stats(dist_matrix, pam_fit$clustering)
+    sil_width[i] <- pam_fit$silinfo$avg.width
+    ch_index[i]  <- cs$ch
+    db_index[i]  <- cs$db
   }
   
-  # Figure: Silhouette
-  png(file.path(output_folder, "04_Silhouette_Analysis.png"), width = 2400, height = 1800, res = 300)
-  plot(2:10, sil_width, type = "b", pch = 19, 
-       xlab = "Number of clusters", ylab = "Average silhouette width",
-       main = paste("Optimal Clusters via Silhouette Method -", community_name))
-  abline(v = which.max(sil_width) + 1, lty = 2, col = "red")
-  dev.off()
+  optimal_k_sil <- k_range[which.max(sil_width)]
+  optimal_k_ch  <- k_range[which.max(ch_index)]
+  optimal_k_db  <- k_range[which.min(db_index)]   # lower is better for DB
   
-  optimal_k <- which.max(sil_width) + 1
-  cat(paste0("  - Optimal clusters: ", optimal_k, "\n"))
+  candidates    <- c(optimal_k_sil, optimal_k_ch, optimal_k_db)
+  vote_table    <- sort(table(candidates), decreasing = TRUE)
+  
+  if (vote_table[1] >= 2) {
+    # At least two indices agree
+    optimal_k <- as.integer(names(vote_table)[1])
+  } else {
+    # All three differ — use the rounded mean
+    optimal_k <- round(mean(candidates))
+  }
+  
+  cat(paste0("  - k candidates  ->  Silhouette: ", optimal_k_sil,
+             " | Calinski-Harabasz: ", optimal_k_ch,
+             " | Davies-Bouldin: ", optimal_k_db, "\n"))
+  cat(paste0("  - Optimal clusters (majority vote): ", optimal_k, "\n"))
+  
+  # Figure: all three indices on one panel
+  index_df <- data.frame(
+    k         = rep(k_range, 3),
+    value     = c(sil_width,
+                  # rescale CH and DB to [0,1] for visual comparison
+                  (ch_index  - min(ch_index))  / (max(ch_index)  - min(ch_index) + 1e-9),
+                  1 - (db_index  - min(db_index))  / (max(db_index)  - min(db_index) + 1e-9)),
+    index     = rep(c("Silhouette (maximise)",
+                      "Calinski-Harabasz (maximise, scaled)",
+                      "Davies-Bouldin (minimise, inverted & scaled)"),
+                    each = n_k)
+  )
+  
+  cluster_selection_plot <- ggplot(index_df, aes(x = k, y = value, colour = index)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.5) +
+    geom_vline(xintercept = optimal_k, linetype = "dashed", colour = "black", linewidth = 0.8) +
+    annotate("text", x = optimal_k + 0.15, y = max(index_df$value) * 0.97,
+             label = paste0("k = ", optimal_k), hjust = 0, size = 3.5) +
+    scale_x_continuous(breaks = k_range) +
+    scale_colour_manual(
+      values = c("Silhouette (maximise)"                        = "#0072B2",
+                 "Calinski-Harabasz (maximise, scaled)"         = "#D55E00",
+                 "Davies-Bouldin (minimise, inverted & scaled)" = "#009E73")
+    ) +
+    theme_bw(base_size = 12) +
+    theme(legend.position  = "bottom",
+          legend.title     = element_blank(),
+          plot.title       = element_text(size = 13, face = "bold", hjust = 0.5),
+          plot.subtitle    = element_text(size = 10, hjust = 0.5)) +
+    labs(
+      title    = paste("Cluster Number Selection –", community_name),
+      subtitle = paste0("Silhouette k=", optimal_k_sil,
+                        " | C-H k=", optimal_k_ch,
+                        " | D-B k=", optimal_k_db,
+                        "  →  Majority-vote k=", optimal_k),
+      x = "Number of clusters (k)",
+      y = "Index value (scaled to [0,1] for comparison)"
+    )
+  
+  ggsave(file.path(output_folder, "04_Cluster_Index_Selection.png"),
+         cluster_selection_plot, width = 9, height = 5, dpi = 300, bg = "white")
   
   # PAM clustering
   set.seed(123)
   pam_result <- pam(dist_matrix, k = optimal_k)
   clusters <- pam_result$clustering
   scores_3d$Cluster <- factor(clusters[match(scores_3d$Site, names(clusters))])
+  # --- Output: site-level ordination + cluster CSV ---
+  site_output <- scores_df %>%
+    left_join(
+      scores_3d %>% select(Site, Cluster),
+      by = c("Representative_Site" = "Site")
+    ) %>%
+    select(
+      Site         = Representative_Site,
+      Latitude,
+      Longitude,
+      NMDS1,
+      NMDS2,
+      Cluster
+    )
+  
+  write.csv(
+    site_output,
+    file      = file.path(output_folder, "site_ordination_clusters.csv"),
+    row.names = FALSE
+  )
+  cat("  - Site ordination CSV saved\n")
   
   # Figure: Dendrogram
   png(file.path(output_folder, "05_Dendrogram.png"), width = 3000, height = 2000, res = 300)

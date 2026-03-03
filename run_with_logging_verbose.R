@@ -20,6 +20,7 @@ suppressPackageStartupMessages({
   library(officer)
   library(indicspecies)
   library(pheatmap)
+  library(fpc)
 })
 
 # create logging dirs
