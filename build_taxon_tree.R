@@ -880,6 +880,11 @@ plot_tree_one_marker <- function(tree, marker, group_name, out_dir) {
 #' @param min_seqs Minimum sequences a marker must have to attempt
 #'        alignment + tree (default 3).
 #' @param force_refresh_jobs If TRUE, ignore Data/jobs.rds and re-fetch.
+#' @param merge_by_species If TRUE (default), clades that end up sharing
+#'        the same species name (paraphyletic species on the NJ tree)
+#'        are merged into one. Pre-merge IDs are kept as
+#'        `genetic_subclade`; `n_subclades > 1` in the summary CSV is
+#'        your cryptic-species shortlist.
 #' @return Invisibly returns a list with all intermediate objects so the
 #'         caller can inspect or post-process.
 #' @export
@@ -888,7 +893,8 @@ build_taxon_tree <- function(rank = "Family",
                              markers = NULL,
                              min_seqs = 3,
                              force_refresh_jobs = FALSE,
-                             out_root = "Output/Phylogenetics") {
+                             out_root = "Output/Phylogenetics",
+                             merge_by_species = TRUE) {
 
   stopifnot(is.character(rank), length(rank) == 1,
             is.character(taxon), length(taxon) == 1)
@@ -948,12 +954,15 @@ build_taxon_tree <- function(rank = "Family",
   for (i in seq_len(nrow(ok))) {
     jid <- ok$JobID[i]
     rec_sub <- matched_uids[as.character(JobID) == jid]
-    seq_tables[[i]] <- tryCatch(
+    # Use single-bracket + list() so NULL returns DON'T silently delete
+    # the slot from seq_tables. `seq_tables[[i]] <- NULL` would shrink the
+    # list and crash the loop a few dozen iterations later.
+    seq_tables[i] <- list(tryCatch(
       extract_sequences_one_job(ok$local_path[i], rec_sub, rank, taxon),
       error = function(e) {
         warning("Job ", jid, " sequence extraction failed: ", e$message)
         NULL
-      })
+      }))
     msg("  job %s -> %d sequences", jid,
         if (is.null(seq_tables[[i]])) 0 else nrow(seq_tables[[i]]))
   }
@@ -1059,6 +1068,30 @@ build_taxon_tree <- function(rank = "Family",
     msg("\nNo candidate undescribed taxa flagged (all tips identified to species).")
   }
 
+  # --- 8. geographic mapping --------------------------------------------
+  geo <- tryCatch(map_taxon_tree(
+                    result = list(records = records_hit,
+                                  marker_results = marker_results,
+                                  output_dir = out_dir),
+                    taxon = taxon),
+                  error = function(e) {
+                    warning("map_taxon_tree failed: ", e$message)
+                    NULL
+                  })
+
+  # --- 9. clade-level geographic mapping --------------------------------
+  clades <- tryCatch(map_clades_geographically(
+                       result = list(records = records_hit,
+                                     marker_results = marker_results,
+                                     output_dir = out_dir),
+                       taxon = taxon,
+                       merge_by_species = merge_by_species),
+                     error = function(e) {
+                       warning("map_clades_geographically failed: ",
+                               e$message)
+                       NULL
+                     })
+
   msg("\nDone. Outputs in %s", out_dir)
   invisible(list(records = records_hit,
                  jobs = jobs,
@@ -1067,7 +1100,997 @@ build_taxon_tree <- function(rank = "Family",
                  marker_results = marker_results,
                  trees = trees,
                  candidates = candidates,
+                 geo = geo,
+                 clades = clades,
                  output_dir = out_dir))
+}
+
+# ============================================================================
+# 10b. Geographic mapping of tree tips
+# ============================================================================
+
+#' Map every tip on every marker tree to the geographic sites where it was
+#' detected. Produces, per marker:
+#'   - geo_detections_<MK>.csv : one row per (tip, UID) detection with lat/lon
+#'   - geo_summary_<MK>.csv    : per-tip lat/lon range, catchments, regions
+#'   - map_<taxon>_<MK>.html   : interactive Leaflet map (if leaflet installed)
+#'   - map_static_<taxon>_<MK>.pdf : static ggplot scatter
+#' Plus a consolidated geo_summary_all_markers.csv across all markers.
+#'
+#' Designed to be called directly on a `build_taxon_tree()` result, or
+#' automatically as the final step of that function.
+#'
+#' @param result A list with $records (filtered records.rds), $marker_results
+#'        (each with $tree carrying tip_data), $output_dir.
+#' @param taxon Display name to use in titles / filenames. Defaults to
+#'        basename(output_dir).
+#' @param markers Optional subset of marker codes to map. NULL = all.
+#' @export
+map_taxon_tree <- function(result, taxon = NULL, markers = NULL) {
+
+  if (is.null(result$records) || nrow(result$records) == 0) {
+    msg("map_taxon_tree: no records — skipping.")
+    return(invisible(NULL))
+  }
+  if (length(result$marker_results) == 0) {
+    msg("map_taxon_tree: no marker results — skipping.")
+    return(invisible(NULL))
+  }
+
+  out_dir <- result$output_dir
+  if (is.null(taxon)) taxon <- basename(out_dir)
+  taxon_clean <- gsub("[^A-Za-z0-9]+", "_", taxon)
+
+  records <- as.data.table(result$records)
+  if (!all(c("Latitude", "Longitude", "UID") %in% names(records))) {
+    msg("map_taxon_tree: records lacks Latitude/Longitude/UID — skipping.")
+    return(invisible(NULL))
+  }
+
+  # Build UID -> location lookup. Preserve other useful site metadata
+  # (sample id, date, catchment, region) where present.
+  loc_cols <- c("UID",
+                intersect(c("Latitude","Longitude","ClientSampleID",
+                            "CollectionDate","Nga_Awa_Catchment",
+                            "Regional_Council"),
+                          names(records)))
+  uid_loc <- unique(records[, loc_cols, with = FALSE], by = "UID")
+  uid_loc[, Latitude  := suppressWarnings(as.numeric(Latitude))]
+  uid_loc[, Longitude := suppressWarnings(as.numeric(Longitude))]
+  uid_loc <- uid_loc[!is.na(Latitude) & !is.na(Longitude)]
+  msg("Mapping: %d UIDs have valid coordinates", nrow(uid_loc))
+  if (nrow(uid_loc) == 0) return(invisible(NULL))
+
+  marker_codes <- names(result$marker_results)
+  if (!is.null(markers)) marker_codes <- intersect(marker_codes, markers)
+
+  geo_summary_list <- list()
+  map_paths <- list()
+
+  for (mk in marker_codes) {
+    tree <- result$marker_results[[mk]]$tree
+    if (is.null(tree)) next
+    md <- attr(tree, "tip_data")
+    if (is.null(md) || nrow(md) == 0 || !"uid_list" %in% names(md)) next
+
+    # Long form: one row per (tip, UID detection)
+    tip_det <- md[, .(UID = unlist(strsplit(as.character(uid_list),
+                                            ",", fixed = TRUE))),
+                  by = .(tip_id = label, ScientificName, Rank,
+                         is_candidate, tip_label)]
+    tip_det <- tip_det[nzchar(UID)]
+    tip_det <- merge(tip_det, uid_loc, by = "UID", all.x = TRUE)
+    tip_det <- tip_det[!is.na(Latitude) & !is.na(Longitude)]
+    if (nrow(tip_det) == 0) {
+      msg("  Marker %s: 0 geocoded detections — skipping.", mk)
+      next
+    }
+    msg("  Marker %s: %d geocoded detections across %d tips",
+        mk, nrow(tip_det), length(unique(tip_det$tip_id)))
+
+    # Per-tip geographic summary
+    tip_geo <- tip_det[, .(
+      n_detections = .N,
+      unique_sites = if ("ClientSampleID" %in% names(.SD))
+                       uniqueN(ClientSampleID) else NA_integer_,
+      lat_min = min(Latitude, na.rm = TRUE),
+      lat_max = max(Latitude, na.rm = TRUE),
+      lon_min = min(Longitude, na.rm = TRUE),
+      lon_max = max(Longitude, na.rm = TRUE),
+      catchments = if ("Nga_Awa_Catchment" %in% names(.SD))
+                     paste(unique(na.omit(Nga_Awa_Catchment)),
+                           collapse = ";") else "",
+      regions    = if ("Regional_Council" %in% names(.SD))
+                     paste(unique(na.omit(Regional_Council)),
+                           collapse = ";") else ""
+    ), by = .(tip_id, ScientificName, Rank, is_candidate)]
+    tip_geo[, Target := mk]
+    setcolorder(tip_geo, c("Target", setdiff(names(tip_geo), "Target")))
+    geo_summary_list[[mk]] <- tip_geo
+
+    # CSVs
+    sum_csv <- file.path(out_dir, sprintf("geo_summary_%s.csv", mk))
+    det_csv <- file.path(out_dir, sprintf("geo_detections_%s.csv", mk))
+    fwrite(tip_geo, sum_csv)
+    fwrite(tip_det, det_csv)
+    msg("    Wrote %s and %s", basename(sum_csv), basename(det_csv))
+
+    # Interactive Leaflet map (clusters at high density, popups per point)
+    if (requireNamespace("leaflet", quietly = TRUE) &&
+        requireNamespace("htmlwidgets", quietly = TRUE)) {
+      tryCatch(
+        map_paths[[paste0(mk, "_html")]] <-
+          .build_leaflet_map(tip_det, mk, taxon, taxon_clean, out_dir),
+        error = function(e)
+          warning("Leaflet map failed for ", mk, ": ", e$message))
+    } else {
+      msg("    (leaflet/htmlwidgets not installed — skipping HTML map)")
+    }
+
+    # Static PDF map (always)
+    tryCatch(
+      map_paths[[paste0(mk, "_pdf")]] <-
+        .build_static_map(tip_det, mk, taxon, taxon_clean, out_dir),
+      error = function(e)
+        warning("Static map failed for ", mk, ": ", e$message))
+  }
+
+  if (length(geo_summary_list) > 0) {
+    all_path <- file.path(out_dir, "geo_summary_all_markers.csv")
+    fwrite(rbindlist(geo_summary_list, fill = TRUE), all_path)
+    msg("Wrote consolidated %s", basename(all_path))
+  }
+
+  invisible(list(summaries = geo_summary_list, maps = map_paths))
+}
+
+# ---- internal: Leaflet HTML map ---------------------------------------------
+.build_leaflet_map <- function(tip_det, mk, taxon, taxon_clean, out_dir) {
+  td <- copy(tip_det)
+  td[, color := fifelse(is_candidate == TRUE, "#D7263D", "#1B998B")]
+  td[, popup := paste0(
+    "<b>", tip_id, "</b><br>",
+    "Species: ", ScientificName,
+    " <i>(", Rank, ")</i><br>",
+    "Candidate undescribed: <b>", is_candidate, "</b><br>",
+    "UID: ", UID, "<br>",
+    if ("ClientSampleID" %in% names(td)) paste0("Sample: ", ClientSampleID, "<br>") else "",
+    if ("CollectionDate" %in% names(td)) paste0("Date: ", CollectionDate, "<br>") else "",
+    if ("Nga_Awa_Catchment" %in% names(td)) paste0("Catchment: ", Nga_Awa_Catchment, "<br>") else "",
+    if ("Regional_Council"  %in% names(td)) paste0("Region: ", Regional_Council) else ""
+  )]
+
+  m <- leaflet::leaflet(td) |>
+    leaflet::addTiles() |>
+    leaflet::addCircleMarkers(
+      lng = ~Longitude, lat = ~Latitude,
+      color = ~color, fillColor = ~color,
+      radius = 5, stroke = TRUE, weight = 1, opacity = 0.85,
+      fillOpacity = 0.65,
+      popup = ~popup,
+      label = ~paste0(tip_id, ": ", ScientificName),
+      clusterOptions = leaflet::markerClusterOptions(
+        spiderfyOnMaxZoom = TRUE,
+        showCoverageOnHover = FALSE)) |>
+    leaflet::addLegend("bottomright",
+      colors = c("#D7263D", "#1B998B"),
+      labels = c("Candidate undescribed", "Identified to species"),
+      title = sprintf("%s — marker %s", taxon, mk),
+      opacity = 0.9)
+
+  html_path <- file.path(out_dir,
+                         sprintf("map_%s_%s.html", taxon_clean, mk))
+  htmlwidgets::saveWidget(m, html_path, selfcontained = TRUE)
+  msg("    Wrote %s", basename(html_path))
+  html_path
+}
+
+# ---- internal: static ggplot PDF map ----------------------------------------
+.build_static_map <- function(tip_det, mk, taxon, taxon_clean, out_dir) {
+  # Optional basemap (rnaturalearth) if installed — falls back to plain
+  # scatter on white otherwise.
+  basemap <- NULL
+  if (requireNamespace("rnaturalearth", quietly = TRUE) &&
+      requireNamespace("sf",            quietly = TRUE)) {
+    basemap <- tryCatch(
+      rnaturalearth::ne_countries(scale = "medium", returnclass = "sf"),
+      error = function(e) NULL)
+  }
+
+  # Sensible map limits with a small buffer
+  lon_lim <- range(tip_det$Longitude, na.rm = TRUE) + c(-0.5, 0.5)
+  lat_lim <- range(tip_det$Latitude,  na.rm = TRUE) + c(-0.5, 0.5)
+
+  p <- ggplot()
+  if (!is.null(basemap)) {
+    p <- p + ggplot2::geom_sf(data = basemap,
+                              fill = "grey95", colour = "grey70",
+                              linewidth = 0.2)
+  }
+  p <- p +
+    ggplot2::geom_point(data = tip_det[is_candidate == FALSE],
+                        ggplot2::aes(x = Longitude, y = Latitude),
+                        colour = "#1B998B", size = 1.4, alpha = 0.55) +
+    # Candidates drawn on top, bigger, red
+    ggplot2::geom_point(data = tip_det[is_candidate == TRUE],
+                        ggplot2::aes(x = Longitude, y = Latitude),
+                        colour = "#D7263D", size = 2.2, alpha = 0.85) +
+    ggplot2::coord_sf(xlim = lon_lim, ylim = lat_lim,
+                      default_crs = sf::st_crs(4326),
+                      expand = FALSE) +
+    ggplot2::labs(
+      title = sprintf("%s — geographic distribution (marker %s)",
+                      taxon, mk),
+      subtitle = sprintf("%d geocoded detections across %d tips (red = candidate undescribed)",
+                         nrow(tip_det),
+                         length(unique(tip_det$tip_id))),
+      x = NULL, y = NULL) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(panel.grid.major = ggplot2::element_line(colour = "grey92"),
+                   plot.title = ggplot2::element_text(face = "bold"))
+
+  # Fallback if rnaturalearth/sf missing: use coord_quickmap
+  if (is.null(basemap)) {
+    p <- p + ggplot2::coord_quickmap(xlim = lon_lim, ylim = lat_lim)
+  }
+
+  pdf_path <- file.path(out_dir,
+                        sprintf("map_static_%s_%s.pdf", taxon_clean, mk))
+  ggplot2::ggsave(pdf_path, p, width = 8, height = 10)
+  msg("    Wrote %s", basename(pdf_path))
+  pdf_path
+}
+
+# ============================================================================
+# 10c. Clade-level geographic mapping
+# ============================================================================
+
+#' Define clades by cutting each marker tree at a distance threshold, then
+#' map each clade geographically with one consistent colour per clade.
+#'
+#' Rationale: a clade of similar sequences detected in one region is the
+#' signal of a real cryptic taxon; the same clade scattered nationwide is
+#' more likely a widespread species with multiple haplotypes that the
+#' reference database happens to lack. Looking at clades on a map
+#' (rather than individual tips) makes this distinction visible.
+#'
+#' Method: hierarchical clustering (complete linkage by default) on the
+#' tree's cophenetic distances, cut at `distance_threshold`. This is
+#' equivalent to "all tips within the threshold of each other form a
+#' clade". For NJ + K80 in eDNA barcode markers, ~0.03 is a reasonable
+#' default; vary it to explore.
+#'
+#' @param result Output of build_taxon_tree().
+#' @param taxon  Display name; defaults to basename(result$output_dir).
+#' @param distance_threshold Cut height for clade definition (default 0.03).
+#' @param markers Optional subset of marker codes.
+#' @param linkage `hclust` linkage; one of "complete" (default), "single",
+#'        "average".
+#' @param min_clade_size Drop clades with fewer than this many tips from
+#'        plots (still listed in CSVs).
+#' @param min_clade_size Drop clades with fewer than this many tips from
+#'        plots (still listed in CSVs).
+#' @param max_clades_to_map Deprecated under the new default — every clade
+#'        is drawn with a distinct colour from the cycling palette. Kept
+#'        for backward compatibility; default `Inf` (no cap).
+#' @param focus_clades Deprecated under the new default — every clade is
+#'        drawn. Kept for backward compatibility; passing a value just
+#'        prints an informational message.
+#' Map every clade on every marker tree to the geographic sites where it
+#' was detected, with clades defined by tree topology.
+#'
+#' Algorithm (the only one — no thresholds, no fixed K):
+#'   1. Post-order traverse the tree; precompute the set of unique
+#'      species names found in the subtree below every internal node.
+#'   2. Top-down walk from root: if a node's subtree contains 0 or 1
+#'      unique species, the whole subtree is one clade. Otherwise the
+#'      node is a clade-split boundary and we recurse into its children.
+#'   3. Each clade is named by its species (or "Unnamed clade N" when no
+#'      species-level tip is inside).
+#'   4. Optional: clades that end up sharing the same species name
+#'      (paraphyletic species on the NJ tree) are merged via union-find,
+#'      with the pre-merge IDs preserved on every tip as `genetic_subclade`.
+#'      `n_subclades > 1` in the summary flags cryptic-species candidates.
+#'
+#' The number of clades is purely data-driven — there's no cap.
+#'
+#' @param result Output of build_taxon_tree().
+#' @param taxon Display name; defaults to basename(result$output_dir).
+#' @param markers Optional subset of marker codes.
+#' @param min_clade_size Drop clades smaller than this from plots
+#'        (still listed in CSVs). Default 1 (keep everything).
+#' @param max_clades_to_map Deprecated; kept for API compatibility.
+#'        Every clade is drawn distinctly.
+#' @param focus_clades Deprecated; kept for API compatibility.
+#' @param merge_by_species If TRUE (default), clades that end up sharing
+#'        the same species name are merged back together. The pre-merge
+#'        clade IDs are retained on every tip as `genetic_subclade`, so
+#'        clades with `n_subclades > 1` in the summary are exactly the
+#'        candidate cryptic species. Set FALSE to see the raw paraphyletic
+#'        splits.
+#' @export
+map_clades_geographically <- function(result, taxon = NULL,
+                                       markers = NULL,
+                                       min_clade_size = 1L,
+                                       max_clades_to_map = Inf,
+                                       focus_clades = NULL,
+                                       merge_by_species = TRUE) {
+
+  if (length(result$marker_results) == 0) {
+    msg("map_clades_geographically: no marker results — skipping."); return(invisible(NULL))
+  }
+  if (is.null(result$records) || nrow(result$records) == 0) {
+    msg("map_clades_geographically: no records — skipping."); return(invisible(NULL))
+  }
+
+  out_dir <- result$output_dir
+  if (is.null(taxon)) taxon <- basename(out_dir)
+  taxon_clean <- gsub("[^A-Za-z0-9]+", "_", taxon)
+
+  # UID -> location lookup (same approach as map_taxon_tree)
+  records <- as.data.table(result$records)
+  loc_cols <- c("UID",
+                intersect(c("Latitude","Longitude","ClientSampleID",
+                            "CollectionDate","Nga_Awa_Catchment",
+                            "Regional_Council"), names(records)))
+  uid_loc <- unique(records[, loc_cols, with = FALSE], by = "UID")
+  uid_loc[, Latitude  := suppressWarnings(as.numeric(Latitude))]
+  uid_loc[, Longitude := suppressWarnings(as.numeric(Longitude))]
+  uid_loc <- uid_loc[!is.na(Latitude) & !is.na(Longitude)]
+
+  marker_codes <- names(result$marker_results)
+  if (!is.null(markers)) marker_codes <- intersect(marker_codes, markers)
+
+  msg("\nClade-level mapping: topology recursion (one clade per subtree with ≤1 species)")
+  out <- list()
+
+  for (mk in marker_codes) {
+    tree <- result$marker_results[[mk]]$tree
+    if (is.null(tree)) next
+    md <- attr(tree, "tip_data")
+    if (is.null(md) || nrow(md) == 0 || !"uid_list" %in% names(md)) next
+    if (length(tree$tip.label) < 2) {
+      msg("  Marker %s: <2 tips, skipping.", mk); next
+    }
+
+    # 1. Define clades by tree topology only — no thresholds, no fixed K.
+    #    Each clade is a connected subtree containing ≤1 unique species.
+    #    The number of clades is purely data-driven.
+    coph <- cophenetic.phylo(tree)
+    hc   <- hclust(as.dist(coph), method = "complete")
+    # Compute fine-grained sub-clusters at d=0.03 — surfaces cryptic
+    # species candidates inside each named clade via `n_subclades`.
+    raw_clade_id <- cutree(hc, h = 0.03)
+
+    asg <- .assign_clades_by_topology(tree, md)
+    clade_id  <- asg$clade_id[names(raw_clade_id)]
+    tip_to_key <- asg$tip_to_name[names(raw_clade_id)]
+    n_named   <- sum(!startsWith(asg$clade_name_per_id, "Unnamed clade"))
+    n_unnamed <- sum( startsWith(asg$clade_name_per_id, "Unnamed clade"))
+    msg("  Marker %s: topology -> %d clades (%d named, %d unnamed)",
+        mk, length(unique(clade_id)), n_named, n_unnamed)
+
+    # Optional: merge clades that ended up sharing a species name
+    # (paraphyletic species on the NJ tree). Pre-merge IDs become
+    # `genetic_subclade`.
+    n_split_species  <- 0L
+    n_raw_clades_pre <- length(unique(clade_id))
+    if (isTRUE(merge_by_species)) {
+      # Get the name of each clade
+      clade_to_name <- unique(data.table(c = clade_id, n = tip_to_key))
+      by_name <- split(clade_to_name$c, clade_to_name$n)
+      by_name <- by_name[!startsWith(names(by_name), "Unnamed clade")]
+      all_c  <- as.character(unique(clade_id))
+      parent <- setNames(all_c, all_c)
+      find_root <- function(x) {
+        x <- as.character(x)
+        while (parent[[x]] != x) {
+          parent[[x]] <<- parent[[parent[[x]]]]
+          x <- parent[[x]]
+        }
+        x
+      }
+      union_c <- function(a, b) {
+        ra <- find_root(a); rb <- find_root(b)
+        if (ra != rb) parent[[ra]] <<- rb
+      }
+      for (cs in by_name) {
+        cs <- unique(cs)
+        if (length(cs) > 1) {
+          n_split_species <- n_split_species + 1L
+          anchor <- cs[1]
+          for (other in cs[-1]) union_c(anchor, other)
+        }
+      }
+      if (n_split_species > 0) {
+        merged <- vapply(clade_id,
+                         function(c) as.integer(find_root(c)),
+                         integer(1))
+        names(merged) <- names(clade_id)
+        clade_id <- merged
+        msg("    merge_by_species: %d species spanned multiple subtrees; %d -> %d clades after merge",
+            n_split_species, n_raw_clades_pre, length(unique(clade_id)))
+      }
+    }
+
+    # 2. Relabel clades by total n_samples so clade 1 = biggest
+    tmp_md <- copy(md)[, .(label, n_samples = as.integer(n_samples))]
+    tmp_md[, clade_raw := clade_id[label]]
+    clade_order <- tmp_md[, .(total_n = sum(n_samples)), by = clade_raw][
+                          order(-total_n)]
+    clade_order[, new_id := seq_len(.N)]
+    relabel <- setNames(clade_order$new_id, clade_order$clade_raw)
+    clade_assign <- data.table(
+      label            = names(clade_id),
+      clade            = as.integer(relabel[as.character(clade_id)]),
+      genetic_subclade = as.integer(raw_clade_id[names(clade_id)])
+    )
+    # Attach the topology-derived clade name to every tip — this is the
+    # canonical name from the recursion (species name or "Unnamed clade N")
+    # and what gets used in legends/maps.
+    clade_assign[, clade_key := tip_to_key[label]]
+
+    sizes <- as.integer(table(clade_assign$clade))
+    msg("  Marker %s: %d clades (sizes: %d–%d tips; %d singletons)",
+        mk, length(unique(clade_assign$clade)),
+        min(sizes), max(sizes), sum(sizes == 1))
+
+    # 3. Build per-tip table with clade label + per-clade summary
+    md_clade <- merge(md, clade_assign, by = "label", sort = FALSE)
+    # The clade name IS the topology-derived label. Renumber "Unnamed
+    # clade N" by the new clade IDs so the numbering stays consistent
+    # after renumbering by total samples.
+    clade_names <- unique(md_clade[, .(clade, clade_name = clade_key)])
+    clade_names[, has_species_label := !startsWith(clade_name, "Unnamed clade")]
+    # Renumber unnamed clades to match their final clade IDs
+    clade_names[!has_species_label,
+                clade_name := paste0("Unnamed clade ", clade)]
+    clade_summary <- md_clade[, .(
+      n_tips           = .N,
+      n_samples_total  = sum(as.integer(n_samples)),
+      reads_total      = sum(as.integer(total_reads)),
+      taxa             = paste(sort(unique(ScientificName)), collapse = ";"),
+      ranks            = paste(sort(unique(Rank)), collapse = ";"),
+      n_candidate_tips = sum(is_candidate == TRUE),
+      # n_subclades > 1 = cryptic-species candidate inside this named clade
+      n_subclades      = uniqueN(genetic_subclade),
+      tip_ids          = paste(label, collapse = ";")
+    ), by = clade][order(clade)]
+    clade_summary <- merge(clade_summary, clade_names, by = "clade",
+                            sort = FALSE)
+    clade_summary[, Target := mk]
+    setcolorder(clade_summary, c("Target", "clade", "clade_name",
+                                  "has_species_label", "n_subclades"))
+
+    # 3. Long form: one row per (clade, tip, UID) with lat/lon
+    det <- md_clade[, .(UID = unlist(strsplit(as.character(uid_list),
+                                              ",", fixed = TRUE))),
+                    by = .(clade, tip_id = label, ScientificName, Rank,
+                           is_candidate)]
+    det <- det[nzchar(UID)]
+    det <- merge(det, uid_loc, by = "UID", all.x = TRUE)
+    det <- det[!is.na(Latitude) & !is.na(Longitude)]
+
+    # 4. Per-clade geographic stats
+    clade_geo <- det[, .(
+      n_geocoded_dets = .N,
+      lat_min = min(Latitude), lat_max = max(Latitude),
+      lon_min = min(Longitude), lon_max = max(Longitude),
+      lat_range = max(Latitude) - min(Latitude),
+      lon_range = max(Longitude) - min(Longitude),
+      catchments = if ("Nga_Awa_Catchment" %in% names(.SD))
+                     paste(sort(unique(na.omit(Nga_Awa_Catchment))),
+                           collapse = ";") else "",
+      regions    = if ("Regional_Council" %in% names(.SD))
+                     paste(sort(unique(na.omit(Regional_Council))),
+                           collapse = ";") else "",
+      n_unique_sites = if ("ClientSampleID" %in% names(.SD))
+                         uniqueN(ClientSampleID) else NA_integer_
+    ), by = clade]
+    clade_summary_full <- merge(clade_summary, clade_geo,
+                                 by = "clade", all.x = TRUE)
+
+    # 5. CSVs
+    md_clade_named <- merge(md_clade, clade_names, by = "clade",
+                             sort = FALSE)
+    fwrite(md_clade_named[, .(Target = mk, clade, clade_name,
+                              genetic_subclade,
+                              tip_id = label,
+                              ScientificName, Rank, is_candidate, n_samples,
+                              total_reads, uid_list)],
+           file.path(out_dir, sprintf("clades_%s.csv", mk)))
+    fwrite(clade_summary_full,
+           file.path(out_dir, sprintf("clades_summary_%s.csv", mk)))
+    msg("    Wrote clades_%s.csv and clades_summary_%s.csv", mk, mk)
+
+    # 6. Per-clade colour palette. Now every clade gets a distinct colour
+    #    from the cycling palette — no "Other clades" bucket. If the user
+    #    set focus_clades, those are highlighted by ordering but all
+    #    clades remain coloured.
+    all_clades <- sort(unique(clade_summary$clade))
+    palette <- .clade_palette(length(all_clades))
+    clade_colors <- setNames(palette, as.character(all_clades))
+
+    # focus_clades retained as a parameter for backward compatibility but
+    # now used only for messaging — every clade is still drawn.
+    if (!is.null(focus_clades)) {
+      msg("    focus_clades requested (%s) — every clade still drawn; focus is informational only.",
+          paste(as.integer(focus_clades), collapse = ", "))
+    }
+    top_clades <- all_clades  # pass all to helpers
+
+    # 7b. clade_id -> clade_name lookup, used to make legend / tip labels
+    #    biologically readable ("C5: Aoteapsyche colonica" instead of "C5").
+    name_lookup <- setNames(clade_names$clade_name,
+                             as.character(clade_names$clade))
+
+    # 8. Tree PDF with tips coloured by clade
+    tryCatch({
+      .plot_tree_by_clade(tree, md_clade, clade_colors, mk, taxon,
+                          taxon_clean, out_dir, top_clades = top_clades,
+                          name_lookup = name_lookup)
+    }, error = function(e)
+       warning("Clade tree plot failed for ", mk, ": ", e$message))
+
+    # 9. Interactive Leaflet map with clades as toggleable layers
+    if (requireNamespace("leaflet",    quietly = TRUE) &&
+        requireNamespace("htmlwidgets", quietly = TRUE) && nrow(det) > 0) {
+      tryCatch({
+        .map_clades_leaflet(det, md_clade, clade_colors, mk, taxon,
+                            taxon_clean, out_dir, min_clade_size,
+                            top_clades = top_clades,
+                            name_lookup = name_lookup)
+      }, error = function(e)
+         warning("Clade map (leaflet) failed for ", mk, ": ", e$message))
+    }
+
+    # 10. Static PDF map by clade
+    if (nrow(det) > 0) {
+      tryCatch({
+        .map_clades_static(det, clade_colors, mk, taxon, taxon_clean,
+                           out_dir, min_clade_size,
+                           top_clades = top_clades,
+                           name_lookup = name_lookup)
+      }, error = function(e)
+         warning("Clade map (static) failed for ", mk, ": ", e$message))
+    }
+
+    out[[mk]] <- list(clade_assign = md_clade_named,
+                      clade_summary = clade_summary_full,
+                      detections = det,
+                      colors = clade_colors,
+                      top_clades = top_clades,
+                      name_lookup = name_lookup)
+  }
+
+  # Consolidated across all markers
+  if (length(out) > 0) {
+    all_summaries <- rbindlist(lapply(out, `[[`, "clade_summary"),
+                                fill = TRUE)
+    fwrite(all_summaries,
+           file.path(out_dir, "clades_summary_all_markers.csv"))
+  }
+  invisible(out)
+}
+
+# ---- internal: distinguishable colour palette of any size -------------------
+# For small N, picks from a curated qualitative palette; for larger N,
+# falls back to evenly-spaced HSV hues which stay distinguishable even at
+# 50+ clades (still imperfect for the eye past ~30, but readable in a
+# legend and unique per clade).
+.clade_palette <- function(n) {
+  base <- c("#D7263D","#1B998B","#3D5A80","#F46036","#9C27B0","#FF9F1C",
+            "#34A853","#E91E63","#4285F4","#FDDB3A","#5C415D","#EE6C4D",
+            "#293241","#7B287D","#FBBC04","#0EAD69","#EA4335","#98C1D9",
+            "#A33B20","#0B7A75","#603A40","#F18F01","#7768AE","#3B6064",
+            "#C73E1D","#F46197","#37123C","#71A2B6","#235789","#F4D35E")
+  if (n <= length(base)) return(base[seq_len(n)])
+  # For more than length(base) clades, generate evenly-spaced HSV hues.
+  # Vary saturation/value across blocks so adjacent clade numbers don't
+  # look identical.
+  sat <- rep(c(0.80, 0.55, 0.95), length.out = n)
+  val <- rep(c(0.85, 0.95, 0.70), length.out = n)
+  hue <- (seq_len(n) - 1L) / n
+  grDevices::hsv(h = hue, s = sat, v = val)
+}
+
+# ---- internal: find the natural "barcode gap" threshold ---------------------
+# Looks at the distribution of pairwise tree distances, fits a kernel
+# density, and locates the deepest valley between the within-species peak
+# (low distances) and the between-species peak (higher distances). That
+# valley is the canonical "barcode gap". If no clear valley exists, falls
+# back to a sensible default for COI-style data.
+.find_barcode_gap <- function(d_matrix, default = 0.03,
+                              search_quantile = 0.6, min_dist = 0.005) {
+  d_vec <- d_matrix[upper.tri(d_matrix)]
+  d_vec <- d_vec[is.finite(d_vec) & d_vec > 0]
+  if (length(d_vec) < 20L) return(default)
+
+  dens <- tryCatch(
+    stats::density(d_vec, n = 1024L, from = 0,
+                   to = stats::quantile(d_vec, 0.99, names = FALSE),
+                   bw = "nrd0"),
+    error = function(e) NULL)
+  if (is.null(dens)) return(default)
+
+  upper_x <- stats::quantile(d_vec, search_quantile, names = FALSE)
+  mask <- dens$x >= min_dist & dens$x <= upper_x
+  if (sum(mask) < 5L) return(default)
+  x <- dens$x[mask]; y <- dens$y[mask]
+
+  if (length(y) < 3L) return(default)
+  # Local minima (strict): y[i] < both neighbours
+  is_min <- c(FALSE,
+              y[-c(1L, length(y))] < y[-c(length(y) - 1L, length(y))] &
+              y[-c(1L, length(y))] < y[-c(1L, 2L)],
+              FALSE)
+  valley_idx <- which(is_min)
+  if (length(valley_idx) == 0L) return(default)
+
+  deepest <- valley_idx[which.min(y[valley_idx])]
+  cut_x <- x[deepest]
+  if (!is.finite(cut_x) || cut_x <= 0) return(default)
+  cut_x
+}
+
+# ---- internal: assign clades by tree topology -------------------------------
+# Algorithm (the only one — no thresholds, no fixed K):
+#   1. Post-order traverse the rooted tree; precompute, for every node,
+#      the set of unique species-level ScientificNames found in the
+#      subtree rooted at that node.
+#   2. Top-down walk from the root: a subtree with ≤1 unique species
+#      becomes one clade. If a subtree has ≥2 species, this is a
+#      clade-split boundary — recurse into the children.
+#   3. Each resulting clade is named by its single species (if any) or
+#      "Unnamed clade N" if no species-level tip is inside.
+#
+# Returns a list with:
+#   $clade_id          int vector, named by tip label
+#   $tip_to_name       char vector, named by tip label
+#   $clade_name_per_id char vector, indexed by clade ID
+.assign_clades_by_topology <- function(tree, md) {
+  n_tips     <- length(tree$tip.label)
+  n_internal <- tree$Nnode
+  n_total    <- n_tips + n_internal
+
+  if (n_tips < 2) {
+    return(list(
+      clade_id          = setNames(1L, tree$tip.label),
+      tip_to_name       = setNames("Singleton", tree$tip.label),
+      clade_name_per_id = setNames("Singleton", "1")
+    ))
+  }
+
+  # Build tip -> species lookup (NA when the tip isn't species-level)
+  tip_species <- setNames(rep(NA_character_, n_tips), tree$tip.label)
+  if (!is.null(md) && nrow(md) > 0) {
+    for (i in seq_len(nrow(md))) {
+      lbl <- md$label[i]
+      if (!(lbl %in% tree$tip.label)) next
+      rk <- tolower(as.character(md$Rank[i]))
+      nm <- as.character(md$ScientificName[i])
+      if (rk %in% c("species", "subspecies") &&
+          !is.na(nm) && nzchar(nm)) {
+        tip_species[lbl] <- nm
+      }
+    }
+  }
+
+  # Build child relationships
+  children <- vector("list", n_total)
+  for (i in seq_len(nrow(tree$edge))) {
+    p <- tree$edge[i, 1]
+    c <- tree$edge[i, 2]
+    children[[p]] <- c(children[[p]], c)
+  }
+
+  # Find root (the only node that's never a child)
+  all_children <- unique(tree$edge[, 2])
+  root_candidates <- setdiff(seq_len(n_total), all_children)
+  root <- if (length(root_candidates) == 1L) root_candidates else (n_tips + 1L)
+
+  # Post-order traversal (iterative; safe for deep trees)
+  node_species   <- vector("list", n_total)
+  node_tips_list <- vector("list", n_total)
+
+  visited <- rep(FALSE, n_total)
+  pending <- c(root)
+  order   <- integer(0)
+  while (length(pending) > 0) {
+    top <- pending[length(pending)]
+    if (top <= n_tips || visited[top]) {
+      order   <- c(order, top)
+      pending <- pending[-length(pending)]
+    } else {
+      visited[top] <- TRUE
+      kids <- children[[top]]
+      pending <- c(pending, kids)
+    }
+  }
+
+  for (node in order) {
+    if (node <= n_tips) {
+      sp <- tip_species[tree$tip.label[node]]
+      node_tips_list[[node]] <- node
+      node_species[[node]]   <- if (is.na(sp)) character(0) else sp
+    } else {
+      kids <- children[[node]]
+      node_tips_list[[node]] <- unlist(lapply(kids,
+                                              function(k) node_tips_list[[k]]))
+      node_species[[node]]   <- unique(unlist(lapply(kids,
+                                              function(k) node_species[[k]])))
+    }
+  }
+
+  # Top-down clade assignment using an explicit queue
+  clade_id          <- integer(n_tips)
+  clade_name_per_id <- character(0)
+  next_id           <- 1L
+  unnamed_counter   <- 1L
+
+  to_process <- list(root)
+  while (length(to_process) > 0) {
+    node <- to_process[[1]]
+    to_process <- to_process[-1]
+
+    sp   <- node_species[[node]]
+    tips <- node_tips_list[[node]]
+
+    if (length(sp) <= 1) {
+      cid <- next_id
+      next_id <- next_id + 1L
+      clade_id[tips] <- cid
+      if (length(sp) == 1) {
+        clade_name_per_id[cid] <- sp[1]
+      } else {
+        clade_name_per_id[cid] <- paste0("Unnamed clade ", unnamed_counter)
+        unnamed_counter <- unnamed_counter + 1L
+      }
+    } else {
+      if (node > n_tips) {
+        for (k in children[[node]]) to_process[[length(to_process) + 1L]] <- k
+      } else {
+        # A tip with >1 species shouldn't happen, but cope gracefully
+        cid <- next_id
+        next_id <- next_id + 1L
+        clade_id[node] <- cid
+        clade_name_per_id[cid] <- sp[1]
+      }
+    }
+  }
+
+  names(clade_id) <- tree$tip.label
+  tip_to_name <- setNames(clade_name_per_id[clade_id], tree$tip.label)
+
+  list(
+    clade_id          = clade_id,
+    tip_to_name       = tip_to_name,
+    clade_name_per_id = clade_name_per_id
+  )
+}
+
+# ---- internal: clade name = dominant species-level name, NA if none ---------
+# Used to label clades after tree-based cutting. Returns NA when the clade
+# has no tip identified to species/subspecies — caller then names it
+# "Unnamed clade N" and flags it as a candidate undescribed lineage.
+.compute_clade_name <- function(dt_clade) {
+  d <- copy(dt_clade)
+  d[, rk := tolower(as.character(Rank))]
+  sp <- d[rk %in% c("species", "subspecies") &
+          !is.na(ScientificName) & nzchar(ScientificName)]
+  if (nrow(sp) == 0L) return(NA_character_)
+  sp[, n := suppressWarnings(as.integer(n_samples))]
+  sp[is.na(n), n := 0L]
+  agg <- sp[, .(total_n = sum(n)), keyby = ScientificName]
+  setorder(agg, -total_n, ScientificName)
+  agg$ScientificName[1L]
+}
+
+# ---- internal: tree PDF with tips coloured by clade -------------------------
+# Every clade gets a colour from the cycling palette; no greying-out of
+# "non-top" clades any more.
+.plot_tree_by_clade <- function(tree, md_clade, clade_colors, mk, taxon,
+                                taxon_clean, out_dir, top_clades = NULL,
+                                name_lookup = NULL) {
+  tip_clade <- md_clade$clade[match(tree$tip.label, md_clade$label)]
+  tip_col   <- clade_colors[as.character(tip_clade)]
+  tip_col[is.na(tip_col)] <- "grey60"
+
+  tip_lab <- md_clade$tip_label[match(tree$tip.label, md_clade$label)]
+  tip_lab <- ifelse(is.na(tip_lab), tree$tip.label,
+                    sprintf("[C%d] %s", tip_clade, tip_lab))
+
+  t2 <- tree
+  t2$tip.label <- tip_lab
+
+  pdf_path <- file.path(out_dir,
+                        sprintf("tree_clades_%s_%s.pdf", taxon_clean, mk))
+  pdf(pdf_path, width = 11,
+      height = max(4, length(tree$tip.label) * 0.20))
+  ape::plot.phylo(t2, type = "phylogram", cex = 0.7,
+                  label.offset = max(node.depth.edgelength(tree),
+                                     na.rm = TRUE) * 0.01,
+                  tip.color = tip_col, no.margin = FALSE,
+                  main = sprintf("%s — marker %s (%d clades)",
+                                 taxon, mk,
+                                 length(unique(md_clade$clade))))
+  ape::add.scale.bar(cex = 0.6)
+
+  # Inline legend — cap at ~30 entries for readability, with "..." marker
+  # if more. (Full list is in clades_summary_<MK>.csv.)
+  clade_n <- table(md_clade$clade)
+  legend_clades <- as.integer(names(sort(clade_n, decreasing = TRUE)))
+  show_n <- min(length(legend_clades), 30L)
+  show <- legend_clades[seq_len(show_n)]
+  .lab <- function(cid) {
+    nm <- if (!is.null(name_lookup)) name_lookup[as.character(cid)] else NA
+    nm <- if (is.null(nm) || is.na(nm) || !nzchar(nm)) "" else paste0(": ", nm)
+    sprintf("C%d%s (%d tips)", cid, nm,
+            as.integer(clade_n[as.character(cid)]))
+  }
+  legend_text <- vapply(show, .lab, character(1))
+  if (length(legend_clades) > show_n) {
+    legend_text <- c(legend_text,
+                     sprintf("… +%d more (see CSV)",
+                             length(legend_clades) - show_n))
+  }
+  legend("bottomleft",
+         legend = legend_text,
+         text.col = c(clade_colors[as.character(show)],
+                      if (length(legend_clades) > show_n) "grey40"),
+         bty = "n", cex = 0.6)
+  dev.off()
+  msg("    Wrote %s", basename(pdf_path))
+  pdf_path
+}
+
+# ---- internal: Leaflet map with clades as toggleable groups -----------------
+# Every clade gets its own toggleable layer and a distinct colour from the
+# cycling palette. No "Other clades" bucket — when the data has many clades,
+# colours simply recycle in a way that adjacent clades stay distinguishable.
+.map_clades_leaflet <- function(det, md_clade, clade_colors, mk, taxon,
+                                taxon_clean, out_dir, min_clade_size,
+                                top_clades = NULL, name_lookup = NULL) {
+  td <- copy(det)
+
+  .clade_label <- function(cid) {
+    nm <- if (!is.null(name_lookup)) name_lookup[as.character(cid)] else NA
+    if (is.null(nm) || is.na(nm) || !nzchar(nm)) sprintf("C%d", cid)
+    else sprintf("C%d: %s", cid, nm)
+  }
+
+  td[, color := clade_colors[as.character(clade)]]
+  td[, group := vapply(clade, .clade_label, character(1))]
+
+  # Filter small clades from the map (still in CSVs). Default min=1 keeps
+  # everything.
+  size_per_clade <- md_clade[, .N, by = clade]
+  keep <- size_per_clade[N >= min_clade_size]$clade
+  td <- td[clade %in% keep]
+  if (nrow(td) == 0) return(invisible(NULL))
+
+  td[, popup := paste0(
+    "<b>", group, "</b><br>",
+    tip_id, " — ", ScientificName, " (", Rank, ")<br>",
+    "UID: ", UID, "<br>",
+    if ("ClientSampleID" %in% names(td))
+       paste0("Sample: ", ClientSampleID, "<br>") else "",
+    if ("CollectionDate" %in% names(td))
+       paste0("Date: ", CollectionDate, "<br>") else "",
+    if ("Nga_Awa_Catchment" %in% names(td))
+       paste0("Catchment: ", Nga_Awa_Catchment) else "")]
+
+  # Order: clades by numeric ID so the panel reads top-down sensibly
+  present <- sort(unique(td$clade))
+  group_order <- vapply(present, .clade_label, character(1))
+
+  m <- leaflet::leaflet() |> leaflet::addTiles()
+  for (g in group_order) {
+    sub <- td[group == g]
+    if (nrow(sub) == 0) next
+    m <- m |> leaflet::addCircleMarkers(
+      data = sub,
+      lng = ~Longitude, lat = ~Latitude,
+      color = ~color, fillColor = ~color,
+      radius = 5, weight = 1,
+      opacity = 0.85, fillOpacity = 0.65,
+      popup = ~popup,
+      label = ~paste0(group, " — ", ScientificName),
+      group = g)
+  }
+
+  m <- m |>
+    leaflet::addLayersControl(overlayGroups = group_order,
+      options = leaflet::layersControlOptions(collapsed = FALSE)) |>
+    leaflet::addLegend("bottomright",
+      colors = clade_colors[as.character(present)],
+      labels = group_order,
+      title = sprintf("%s — marker %s (%d clades)",
+                      taxon, mk, length(present)),
+      opacity = 0.9)
+
+  html_path <- file.path(out_dir,
+                         sprintf("map_clades_%s_%s.html",
+                                 taxon_clean, mk))
+  htmlwidgets::saveWidget(m, html_path, selfcontained = TRUE)
+  msg("    Wrote %s", basename(html_path))
+  html_path
+}
+
+# ---- internal: static ggplot map coloured by clade --------------------------
+# All clades coloured distinctly via the cycling palette; no "Other" bucket.
+.map_clades_static <- function(det, clade_colors, mk, taxon,
+                                taxon_clean, out_dir, min_clade_size,
+                                top_clades = NULL, name_lookup = NULL) {
+  td <- copy(det)
+
+  .clade_label <- function(cid) {
+    nm <- if (!is.null(name_lookup)) name_lookup[as.character(cid)] else NA
+    if (is.null(nm) || is.na(nm) || !nzchar(nm)) sprintf("C%d", cid)
+    else sprintf("C%d: %s", cid, nm)
+  }
+
+  present <- sort(unique(td$clade))
+  lvls    <- vapply(present, .clade_label, character(1))
+  td[, clade_lbl := factor(vapply(clade, .clade_label, character(1)),
+                            levels = lvls)]
+
+  sizes <- table(td$clade)
+  keep <- as.integer(names(sizes[sizes >= min_clade_size]))
+  td <- td[clade %in% keep]
+  if (nrow(td) == 0) return(invisible(NULL))
+
+  pal <- clade_colors[as.character(present)]
+  names(pal) <- lvls
+
+  basemap <- NULL
+  if (requireNamespace("rnaturalearth", quietly = TRUE) &&
+      requireNamespace("sf",            quietly = TRUE)) {
+    basemap <- tryCatch(rnaturalearth::ne_countries(scale = "medium",
+                                                    returnclass = "sf"),
+                        error = function(e) NULL)
+  }
+  lon_lim <- range(td$Longitude) + c(-0.5, 0.5)
+  lat_lim <- range(td$Latitude)  + c(-0.5, 0.5)
+
+  p <- ggplot()
+  if (!is.null(basemap)) {
+    p <- p + ggplot2::geom_sf(data = basemap, fill = "grey95",
+                              colour = "grey70", linewidth = 0.2)
+  }
+  p <- p +
+    ggplot2::geom_point(data = td,
+                  ggplot2::aes(x = Longitude, y = Latitude,
+                               colour = clade_lbl),
+                  size = 1.7, alpha = 0.8) +
+    ggplot2::scale_colour_manual(values = pal, name = "Clade",
+                                  drop = FALSE) +
+    ggplot2::labs(
+      title = sprintf("%s — clades on the map (marker %s)", taxon, mk),
+      subtitle = sprintf("%d geocoded detections across %d clades",
+                         nrow(td), length(present))) +
+    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme(panel.grid.major = ggplot2::element_line(colour = "grey92"),
+                   plot.title = ggplot2::element_text(face = "bold"),
+                   legend.position = "right",
+                   legend.text = ggplot2::element_text(size = 6),
+                   legend.key.height = ggplot2::unit(0.3, "cm"))
+  if (!is.null(basemap)) {
+    p <- p + ggplot2::coord_sf(xlim = lon_lim, ylim = lat_lim,
+                                default_crs = sf::st_crs(4326),
+                                expand = FALSE)
+  } else {
+    p <- p + ggplot2::coord_quickmap(xlim = lon_lim, ylim = lat_lim)
+  }
+
+  pdf_path <- file.path(out_dir,
+                        sprintf("map_clades_static_%s_%s.pdf",
+                                taxon_clean, mk))
+  # Scale page width with clade count to accommodate the legend
+  page_w <- min(20, 9 + max(0, length(present) - 20) * 0.05)
+  ggplot2::ggsave(pdf_path, p, width = page_w, height = 10)
+  msg("    Wrote %s", basename(pdf_path))
+  pdf_path
 }
 
 # ============================================================================
