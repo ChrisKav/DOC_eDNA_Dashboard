@@ -658,7 +658,7 @@ align_one_marker <- function(marker_dt, marker) {
   # Sanitize sequences: uppercase, ATCGN only — DECIPHER tolerates ambiguity
   # codes but it's worth catching obvious garbage early.
   seqs <- toupper(gsub("[^ACGTUNRYSWKMBDHV-]", "N", marker_dt$Sequence))
-  dnass <- DNAStringSet(seqs)
+  dnass <- Biostrings::DNAStringSet(seqs)
 
   # Build informative names: TipID = paste(Target, idx) — short, unique,
   # safe for Newick. We carry the long label separately for plotting.
@@ -995,11 +995,11 @@ build_taxon_tree <- function(rank = "Family",
     # Write FASTA and alignment for downstream use
     fa_path <- file.path(out_dir, sprintf("seqs_%s.fasta", mk))
     aln_path <- file.path(out_dir, sprintf("aln_%s.fasta", mk))
-    writeXStringSet(DNAStringSet(setNames(sub$Sequence,
+    Biostrings::writeXStringSet(Biostrings::DNAStringSet(setNames(sub$Sequence,
                                           sprintf("%s_%03d", mk,
                                                   seq_len(nrow(sub))))),
                     fa_path)
-    writeXStringSet(aln, aln_path)
+    Biostrings::writeXStringSet(aln, aln_path)
 
     tree <- tryCatch(build_tree_one_marker(aln, sub, mk),
                      error = function(e) {

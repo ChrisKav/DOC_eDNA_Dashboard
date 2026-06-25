@@ -274,104 +274,117 @@ if (length(missing_idx) > 0 && "UID" %in% names(all_samples)) {
 }
 msg("Sample metadata joined.")
 
-# ---------- 8) Taxonomy lineage merge using get_lineages() ----------
-msg("Adding taxonomic lineages using wilderlab::get_lineages()...")
+# ---------- 8) Taxonomy lineage merge (FIXED) ----------
+msg("Adding taxonomic lineages...")
 
-# Extract unique TaxIDs and ensure they're numeric for get_lineages()
-unique_taxids <- unique(na.omit(as.numeric(all_records_dt$TaxID)))
+unique_taxids <- unique(na.omit(all_records_dt$TaxID))
 
 if (length(unique_taxids) > 0) {
   tryCatch({
-    # Use the new get_lineages() function from wilderlab
-    lineages <- get_lineages(unique_taxids)
+    lineages <- get_lineages(as.character(unique_taxids))
     lineage_dt <- as.data.table(lineages)
     
-    # Ensure TaxID column exists and is character in both tables for proper joining
-    if (!"TaxID" %in% names(lineage_dt)) {
-      lineage_dt[, TaxID := as.character(rownames(lineages))]
-    } else {
-      lineage_dt[, TaxID := as.character(TaxID)]
-    }
+    # Standardise column names to uppercase first letter
+    setnames(lineage_dt,
+             old = names(lineage_dt),
+             new = tools::toTitleCase(names(lineage_dt))
+    )
     
-    # Convert TaxID in records to character for consistent merging
+    lineage_dt[, TaxID := as.character(TaxID)]
     all_records_dt[, TaxID := as.character(TaxID)]
     
-    # Merge lineages into records
-    setkey(lineage_dt, TaxID)
-    setkey(all_records_dt, TaxID)
-    all_records_dt <- merge(all_records_dt, lineage_dt, by = "TaxID", all.x = TRUE, sort = FALSE)
+    all_records_dt <- merge(
+      all_records_dt,
+      lineage_dt,
+      by = "TaxID",
+      all.x = TRUE,
+      sort = FALSE
+    )
     
     msg("Lineages merged successfully.")
+    
   }, error = function(e) {
     msg("Warning: Failed to retrieve lineages: %s", e$message)
-    msg("Proceeding without lineage data. Contact Wilderlab if taxonomy IDs are not recognized.")
   })
-} else {
-  msg("No TaxIDs found to retrieve lineages for.")
 }
 
-# Normalize taxa capitalization
-if ("domain" %in% names(all_records_dt)) {
-  all_records_dt[, domain := ifelse(is.na(domain), NA_character_, str_to_title(str_squish(as.character(domain))))]
-}
-if ("phylum" %in% names(all_records_dt)) {
-  all_records_dt[, phylum := ifelse(is.na(phylum), NA_character_, str_to_title(str_squish(as.character(phylum))))]
-}
-if ("class" %in% names(all_records_dt)) {
-  all_records_dt[, class := ifelse(is.na(class), NA_character_, str_to_title(str_squish(as.character(class))))]
-}
-if ("order" %in% names(all_records_dt)) {
-  all_records_dt[, order := ifelse(is.na(order), NA_character_, str_to_title(str_squish(as.character(order))))]
-}
-if ("family" %in% names(all_records_dt)) {
-  all_records_dt[, family := ifelse(is.na(family), NA_character_, str_to_title(str_squish(as.character(family))))]
-}
-if ("genus" %in% names(all_records_dt)) {
-  all_records_dt[, genus := ifelse(is.na(genus), NA_character_, str_to_title(str_squish(as.character(genus))))]
+if (!"Species" %in% names(all_records_dt)) {
+  if ("species" %in% names(all_records_dt)) {
+    setnames(all_records_dt, "species", "Species")
+  } else if ("Name" %in% names(all_records_dt) && "Rank" %in% names(all_records_dt)) {
+    all_records_dt[, Species := fifelse(
+      tolower(Rank) == "species",
+      as.character(Name),
+      NA_character_
+    )]
+  } else {
+    all_records_dt[, Species := NA_character_]
+  }
 }
 
-# After the merge, consolidate the columns
-all_records_dt[, c("Domain.x", "Phylum.x", "Class.x", "Order.x", "Family.x", "Genus.x") := NULL]
-
-# Rename the .y columns to clean names
-setnames(all_records_dt, 
-         old = c("Phylum.y", "Class.y", "Order.y", "Family.y", "Genus.y"),
-         new = c("Phylum", "Class", "Order", "Family", "Genus"))
-
-# Create Species column: use Name when Rank == "species", otherwise NA
-all_records_dt[, Species := fifelse(Rank == "species", Name, NA_character_)]
-
-all_records_dt$Subfamily = NULL
-all_records_dt$Superfamily = NULL
-all_records_dt$species = NULL
-
-# Now your original code will work
-class_synonyms <- list("Actinopteri" = "Actinopterygii")
-for (k in names(class_synonyms)) {
-  all_records_dt[Class == k, Class := class_synonyms[[k]]]
-}
-
-all_records_dt[, Species := as.character(Species)]
-all_records_dt[Species == "Galaxias sp. D (Allibone et al., 1996)", species := 'Galaxias "species D"']
-
-class_synonyms <- list("Actinopteri" = "Actinopterygii")
-for (k in names(class_synonyms)) {
-  all_records_dt[as.character(Class) == k, Class := class_synonyms[[k]]]
-}
-
-# ---------- 9) Fuzzy-match to NZTCS ----------
+# ---------- 9) Fuzzy match (SAFE TAXON MERGE) ----------
 msg("Fuzzy matching Species names to NZTCS...")
+
 all_records_dt[, species_clean := clean_species_names(Species)]
-unique_species_clean <- unique(na.omit(all_records_dt$species_clean))
-choices <- nztcs_sp$species_clean
-max_dist <- 0.12
-matched_choices <- vapply(unique_species_clean, function(x) {
-  idx <- stringdist::amatch(x, choices, method = "jw", maxDist = max_dist)
-  if (is.na(idx)) NA_character_ else choices[idx]
-}, FUN.VALUE = character(1), USE.NAMES = FALSE)
-lookup_dt <- data.table(species_clean = unique_species_clean, matched_Species = matched_choices)
-all_records_dt <- merge(all_records_dt, lookup_dt, by = "species_clean", all.x = TRUE, sort = FALSE)
-all_records_dt <- merge(all_records_dt, nztcs_sp[, .(species_clean, species_nztcs, Status, Category, BioStatus, ThreatReport, Genus, Family, Order, Class, Phylum)], by = "species_clean", all.x = TRUE, sort = FALSE)
+
+lookup_dt <- data.table(
+  species_clean = unique(na.omit(all_records_dt$species_clean))
+)
+
+lookup_dt[, matched := stringdist::amatch(
+  species_clean,
+  nztcs_sp$species_clean,
+  method = "jw",
+  maxDist = 0.12
+)]
+
+lookup_dt[, species_nztcs := nztcs_sp$species_nztcs[matched]]
+
+all_records_dt <- merge(
+  all_records_dt,
+  lookup_dt[, .(species_clean, species_nztcs)],
+  by = "species_clean",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+# Join NZTCS WITHOUT overwriting taxonomy
+all_records_dt <- merge(
+  all_records_dt,
+  nztcs_sp[, .(
+    species_clean,
+    Status, Category, BioStatus, ThreatReport,
+    NZTCS_Genus = Genus,
+    NZTCS_Family = Family,
+    NZTCS_Order = Order,
+    NZTCS_Class = Class,
+    NZTCS_Phylum = Phylum
+  )],
+  by = "species_clean",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+tax_cols <- c("Phylum", "Class", "Order", "Family", "Genus")
+for (col in tax_cols) {
+  if (!col %in% names(all_records_dt)) {
+    all_records_dt[, (col) := NA_character_]
+  }
+}
+
+# ---------- Prefer Wilderlab lineage, fallback to NZTCS ----------
+tax_cols <- c("Phylum", "Class", "Order", "Family", "Genus")
+
+for (col in tax_cols) {
+  nztcs_col <- paste0("NZTCS_", col)
+  
+  if (nztcs_col %in% names(all_records_dt)) {
+    all_records_dt[
+      (is.na(get(col)) | get(col) == "") & !is.na(get(nztcs_col)),
+      (col) := get(nztcs_col)
+    ]
+  }
+}
 
 # ---------- 10) Spatial joins for Nga Awa & Regional Council ----------
 msg("Spatial joins for Nga Awa & Regional Council...")
@@ -428,6 +441,11 @@ DT <- all_records_dt
 
 uid_counts_dt <- DT[, .(total_UID = uniqueN(UID)), by = Report]
 
+first_non_na <- function(x) {
+  idx <- which(!is.na(x) & x != "")
+  if (length(idx) == 0) NA else x[idx[1]]
+}
+
 summary_dt <- DT[, .(
   unique_UID_count = uniqueN(UID),
   UID_list = paste(unique(UID), collapse = "-"),
@@ -448,14 +466,14 @@ summary_dt <- DT[, .(
   MakeDataPublic = as.character(first(MakeDataPublic)),
   Nga_Awa_Catchment = as.character(first(Nga_Awa_Catchment)),
   Regional_Council = as.character(first(Regional_Council)),
-  Phylum = as.character(first(Phylum)),
-  Class = as.character(first(Class)),
-  Order = as.character(first(Order)),
-  Family = as.character(first(Family)),
-  Genus = as.character(first(Genus)),
-  Species = as.character(first(Species)),
+  Phylum = as.character(first_non_na(Phylum)),
+  Class  = as.character(first_non_na(Class)),
+  Order  = as.character(first_non_na(Order)),
+  Family = as.character(first_non_na(Family)),
+  Genus  = as.character(first_non_na(Genus)),
+  Species = as.character(first_non_na(Species)),
   Wilderlab_Sp_name = as.character(first(Wilderlab_Sp_name)),
-  NZTC_Sp_name = as.character(first(species_nztcs))
+  NZTC_Sp_name = as.character(first_non_na(species_nztcs))
 ), by = .(Report, TaxID)]
 
 summary_dt <- merge(summary_dt, uid_counts_dt, by = "Report", all.x = TRUE, sort = FALSE)
@@ -544,9 +562,19 @@ col_order <- names(summary_df)
 # Remove 'NZTC Sp Name' from its current position
 col_order <- col_order[col_order != "NZTC Sp Name"]
 # Find indices
-species_idx <- which(col_order == "species")
+species_idx <- which(tolower(col_order) == "species")
 # Insert after 'species'
-col_order <- append(col_order, "NZTC Sp Name", after = species_idx)
+
+if (length(species_idx) == 1) {
+  col_order <- append(col_order, "NZTC Sp Name", after = species_idx)
+} else {
+  # fallback: just add to end
+  warning("Species column not found – appending NZTC Sp Name at end")
+  col_order <- c(col_order, "NZTC Sp Name")
+}
+
+
+#col_order <- append(col_order, "NZTC Sp Name", after = species_idx)
 # Reorder
 summary_df <- summary_df[, col_order]
 
@@ -569,3 +597,4 @@ msg("Saving unversioned RDS -> ", unversioned)
 saveRDS(summary_df, unversioned)
 
 msg("Completed. Summary rows: %d", nrow(summary_df))
+View(summary_df)
