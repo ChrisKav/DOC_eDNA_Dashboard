@@ -17,7 +17,8 @@ ui <- fluidPage(
   titlePanel("Biodiversity Records Filter"),
   sidebarLayout(
     sidebarPanel(
-      selectInput("Phylum", "Phylum", choices = c("All", unique_sorted(merged$Phylum))),
+      selectInput("Kingdom", "Kingdom", choices = c("All", unique_sorted(merged$Kingdom))),
+      selectInput("Phylum", "Phylum", choices = "All"),
       selectInput("Class", "Class", choices = "All"),
       selectInput("Order", "Order", choices = "All"),
       selectInput("Family", "Family", choices = "All"),
@@ -41,9 +42,13 @@ ui <- fluidPage(
         "gdb_level",
         "Create GDB layers grouped by:",
         choices = c(
-          "Species" = "Species",
-          "Genus" = "Genus",
+          "Kingdom" = "Kingdom",
+          "Phylum" = "Phylum",
+          "Class" = "Class",
+          "Order" = "Order",
           "Family" = "Family",
+          "Genus" = "Genus",
+          "Species" = "Species",
           "Latin Name" = "Latin Name",
           "Wilderlab Sp Name" = "Wilderlab Sp Name"
         ),
@@ -67,7 +72,14 @@ ui <- fluidPage(
 # Server
 server <- function(input, output, session) {
   observeEvent(input$resetFilters, {
-    updateSelectInput(session, "Phylum", selected = "All")
+    updateSelectInput(session, "Kingdom", selected = "All")
+    
+    updateSelectInput(
+      session,
+      "Phylum",
+      choices = c("All", unique_sorted(merged$Phylum)),
+      selected = "All"
+    )
     updateSelectInput(session, "Class", choices = "All", selected = "All")
     updateSelectInput(session, "Order", choices = "All", selected = "All")
     updateSelectInput(session, "Family", choices = "All", selected = "All")
@@ -84,8 +96,37 @@ server <- function(input, output, session) {
     updateSelectInput(session, "Regional Council", selected = "All")
   })
   
+  observeEvent(input$Kingdom, {
+    
+    phyla <- unique_sorted(
+      merged[
+        Kingdom == input$Kingdom | input$Kingdom == "All",
+        Phylum
+      ]
+    )
+    
+    updateSelectInput(
+      session,
+      "Phylum",
+      choices = c("All", phyla),
+      selected = "All"
+    )
+    
+    updateSelectInput(session, "Class", choices = "All")
+    updateSelectInput(session, "Order", choices = "All")
+    updateSelectInput(session, "Family", choices = "All")
+    updateSelectInput(session, "Genus", choices = "All")
+    updateSelectInput(session, "Species", choices = "All")
+  })
+  
   observeEvent(input$Phylum, {
-    classes <- unique_sorted(merged[Phylum == input$Phylum | input$Phylum == "All", Class])
+    classes <- unique_sorted(
+      merged[
+        (Kingdom == input$Kingdom | input$Kingdom == "All") &
+          (Phylum == input$Phylum | input$Phylum == "All"),
+        Class
+      ]
+    )
     updateSelectInput(session, "Class", choices = c("All", classes), selected = "All")
     updateSelectInput(session, "Order", choices = "All")
     updateSelectInput(session, "Family", choices = "All")
@@ -94,17 +135,33 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$Class, {
-    orders <- unique_sorted(merged[
-      (Phylum == input$Phylum | input$Phylum == "All") &
-        (Class == input$Class | input$Class == "All"), Order])
-    updateSelectInput(session, "Order", choices = c("All", orders), selected = "All")
+    
+    orders <- unique_sorted(
+      merged[
+        (Kingdom == input$Kingdom | input$Kingdom == "All") &
+          (Phylum == input$Phylum | input$Phylum == "All") &
+          (Class == input$Class | input$Class == "All"),
+        Order
+      ]
+    )
+    
+    updateSelectInput(
+      session,
+      "Order",
+      choices = c("All", orders),
+      selected = "All"
+    )
+    
     updateSelectInput(session, "Family", choices = "All")
     updateSelectInput(session, "Genus", choices = "All")
     updateSelectInput(session, "Species", choices = "All")
+    
   })
+  
   
   observeEvent(input$Order, {
     families <- unique_sorted(merged[
+      (Kingdom == input$Kingdom | input$Kingdom == "All") &
       (Phylum == input$Phylum | input$Phylum == "All") &
         (Class == input$Class | input$Class == "All") &
         (Order == input$Order | input$Order == "All"), Family])
@@ -115,6 +172,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$Family, {
     genera <- unique_sorted(merged[
+      (Kingdom == input$Kingdom | input$Kingdom == "All") &
       (Phylum == input$Phylum | input$Phylum == "All") &
         (Class == input$Class | input$Class == "All") &
         (Order == input$Order | input$Order == "All") &
@@ -125,6 +183,7 @@ server <- function(input, output, session) {
   
   observeEvent(input$Genus, {
     spp <- unique_sorted(merged[
+      (Kingdom == input$Kingdom | input$Kingdom == "All") &
       (Phylum == input$Phylum | input$Phylum == "All") &
         (Class == input$Class | input$Class == "All") &
         (Order == input$Order | input$Order == "All") &
@@ -138,6 +197,7 @@ server <- function(input, output, session) {
   get_filtered_data <- reactive({
     dt <- copy(merged)
     filters <- list(
+      Kingdom = input$Kingdom,
       Phylum = input$Phylum,
       Class = input$Class,
       Order = input$Order,

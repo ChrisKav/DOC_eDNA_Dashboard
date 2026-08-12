@@ -117,6 +117,13 @@ nztcs_dt[, Genus := cap_case(norm_chr(Genus))]
 nztcs_dt[, Family := cap_case(norm_chr(Family))]
 nztcs_dt[, Order := cap_case(norm_chr(Order))]
 nztcs_dt[, Class := cap_case(norm_chr(Class))]
+
+# Standardise NZTCS class names
+nztcs_dt[Class == "Actinopteri", Class := "Actinopterygii"]
+nztcs_dt[Class == "Hyperoartia", Class := "Petromyzontida"]
+nztcs_dt[Class == "Lepidosauria", Class := "Reptilia"]
+nztcs_dt[Class %in% c("Elasmobranchii", "Holocephali"), Class := "Chondrichthyes"]
+
 nztcs_dt[, Phylum := cap_case(norm_chr(Phylum))]
 nztcs_dt[, Status := norm_chr(Status)]
 nztcs_dt[, Category := norm_chr(Category)]
@@ -386,6 +393,94 @@ for (col in tax_cols) {
   }
 }
 
+# ---------- Taxonomic class standardisation ----------
+msg("Standardising class names...")
+
+if ("Class" %in% names(all_records_dt)) {
+  
+  all_records_dt[, Class := trimws(as.character(Class))]
+  
+  # Ray-finned fishes
+  all_records_dt[
+    Class %in% c("Actinopteri"),
+    Class := "Actinopterygii"
+  ]
+  
+  # Lampreys
+  all_records_dt[
+    Class %in% c("Hyperoartia"),
+    Class := "Petromyzontida"
+  ]
+  
+  # Reptiles
+  all_records_dt[
+    Class %in% c("Lepidosauria"),
+    Class := "Reptilia"
+  ]
+  
+  # Cartilaginous fishes
+  all_records_dt[
+    Class %in% c("Elasmobranchii", "Holocephali"),
+    Class := "Chondrichthyes"
+  ]
+}
+
+# ---------- Kingdom assignment from Phylum ----------
+msg("Assigning kingdoms from phylum...")
+
+if (!"Kingdom" %in% names(all_records_dt)) {
+  all_records_dt[, Kingdom := NA_character_]
+}
+
+# Animals
+animal_phyla <- c(
+  "Chordata","Annelida","Arthropoda","Gastrotricha","Rotifera",
+  "Mollusca","Nemertea","Platyhelminthes","Cnidaria","Bryozoa",
+  "Nematoda","Porifera","Tardigrada","Nematomorpha",
+  "Echinodermata","Chaetognatha","Onychophora",
+  "Xenacoelomorpha","Entoprocta","Brachiopoda",
+  "Phoronida","Hemichordata","Acanthocephala"
+)
+
+# Plants
+plant_phyla <- c(
+  "Tracheophyta","Bryophyta","Marchantiophyta",
+  "Anthocerotophyta","Chlorophyta",
+  "Streptophyta","Prasinodermophyta"
+)
+
+# Fungi
+fungal_phyla <- c(
+  "Ascomycota","Basidiomycota","Chytridiomycota",
+  "Olpidiomycota","Zoopagomycota",
+  "Blastocladiomycota","Sanchytriomycota",
+  "Cryptomycota","Mucoromycota","Microsporidia"
+)
+
+# Chromista
+chromista_phyla <- c(
+  "Bacillariophyta","Oomycota","Ochrophyta",
+  "Haptophyta"
+)
+
+# Protozoa / Protists
+protist_phyla <- c(
+  "Ciliophora","Discosea","Tubulinea","Heterolobosea",
+  "Euglenozoa","Evosea","Cercozoa","Endomyxa",
+  "Apicomplexa","Picozoa","Parabasalia",
+  "Foraminifera","Fornicata","Perkinsozoa",
+  "Preaxostyla","Hemimastigophora","Malawimonada",
+  "Nibbleridia","Amoebozoa", "Telonemia"
+)
+
+# Assign Kingdoms
+all_records_dt[Phylum %in% animal_phyla, Kingdom := "Animalia"]
+all_records_dt[Phylum %in% plant_phyla, Kingdom := "Plantae"]
+all_records_dt[Phylum %in% fungal_phyla, Kingdom := "Fungi"]
+all_records_dt[Phylum %in% chromista_phyla, Kingdom := "Chromista"]
+all_records_dt[Phylum %in% protist_phyla, Kingdom := "Protista"]
+
+
 # ---------- 10) Spatial joins for Nga Awa & Regional Council ----------
 msg("Spatial joins for Nga Awa & Regional Council...")
 NA_shp_path <- "Data/Nga Awa shapefiles/DOC_NgāAwa_RiverSites_20250122_n14.shp"
@@ -434,7 +529,7 @@ msg("Aggregating summary by Report and TaxID...")
 required_cols <- c("Report", "TaxID", "UID", "Count", "ClientSampleID", "Rank", "Name", "CommonName",
                    "Group", "Latitude", "Longitude", "CollectionDate", "Status", "Category", "ThreatReport",
                    "CollectedBy", "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
-                   "Phylum", "Class", "Order", "Family", "Genus", "Species", "Wilderlab_Sp_name", "species_nztcs")
+                   "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Wilderlab_Sp_name", "species_nztcs")
 for (c in required_cols) if (!c %in% names(all_records_dt)) all_records_dt[, (c) := NA_character_]
 
 DT <- all_records_dt
@@ -466,6 +561,7 @@ summary_dt <- DT[, .(
   MakeDataPublic = as.character(first(MakeDataPublic)),
   Nga_Awa_Catchment = as.character(first(Nga_Awa_Catchment)),
   Regional_Council = as.character(first(Regional_Council)),
+  Kingdom = as.character(first_non_na(Kingdom)),
   Phylum = as.character(first_non_na(Phylum)),
   Class  = as.character(first_non_na(Class)),
   Order  = as.character(first_non_na(Order)),
@@ -484,7 +580,7 @@ out_cols <- c("Name", "CommonName", "ClientSampleID", "sum_count", "mean_count",
               "unique_UID_count", "total_UID", "Rank", "Group", "Status", "Category",
               "Latitude", "Longitude", "CollectionDate", "ThreatReport", "CollectedBy",
               "DOC_Data", "MakeDataPublic", "Nga_Awa_Catchment", "Regional_Council",
-              "Phylum", "Class", "Order", "Family", "Genus", "Species",
+              "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species",
               "Wilderlab_Sp_name", "NZTC_Sp_name", "TaxID", "Report")
 out_cols <- intersect(out_cols, names(summary_dt))
 setcolorder(summary_dt, out_cols)
@@ -532,7 +628,7 @@ expected_cols_for_shiny <- c(
   "DOC Data","Public/Private","Nga Awa","Regional Council","Wilderlab Sp Name","NZTC Sp Name",
   "TaxID","Wilderlab Report","Latitude","Longitude",
   # also keep the raw taxonomic cols used by filters
-  "Phylum","Class","Order","Family","Genus","Species"
+  "Kingdom", "Phylum","Class","Order","Family","Genus","Species"
 )
 missing_cols <- setdiff(expected_cols_for_shiny, names(summary_df))
 if (length(missing_cols) > 0) {
@@ -579,7 +675,7 @@ if (length(species_idx) == 1) {
 summary_df <- summary_df[, col_order]
 
 # Capitalise taxonomic columns
-tax_cols <- c("phylum", "class", "order", "family", "genus", "species")
+tax_cols <- c("kingdom", "phylum", "class", "order", "family", "genus", "species")
 for (col in tax_cols) {
   if (col %in% names(summary_df)) {
     names(summary_df)[names(summary_df) == col] <- tools::toTitleCase(col)
