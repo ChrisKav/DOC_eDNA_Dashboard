@@ -24,7 +24,6 @@ suppressPackageStartupMessages({
   library(insect)
   library(wilderlab)
   library(dplyr)
-  library(wilderlab)
 })
 
 # ---------- Helpers ----------
@@ -106,7 +105,7 @@ key <- keys$key; secret <- keys$secret; xapikey <- keys$xapikey
 if (is.na(key) || is.na(secret) || is.na(xapikey)) msg("API keys appear missing — public S3 will still be used.")
 
 today <- Sys.Date()
-msg("Starting data prep: ", format(today))
+msg("Starting data prep: %s", format(today))
 
 # ---------- 1) Read NZTCS spreadsheet ----------
 msg("Reading NZTCS spreadsheet...")
@@ -136,6 +135,52 @@ nztcs_sp <- nztcs_sp[, .(species_nztcs, Status, Category, BioStatus, ThreatRepor
 nztcs_sp[, species_clean := clean_species_names(species_nztcs)]
 
 # ---------- 2) Fetch Wilderlab jobs/samples/taxa (with retries) ----------
+
+cache_file <- "Data/job_cache.rds"
+
+if (file.exists(cache_file)) {
+  cache <- readRDS(cache_file)
+} else {
+  cache <- data.table(
+    JobID = character(),
+    DateProcessed = as.Date(character())
+  )
+}
+
+records_cache_file <- "Data/doc_records.rds"
+
+if (file.exists(records_cache_file)) {
+  records_dt <- readRDS(records_cache_file)
+} else {
+  records_dt <- data.table()
+}
+
+lineage_cache_file <- "Data/lineage_cache.rds"
+
+if (file.exists(lineage_cache_file)) {
+  lineage_cache <- readRDS(lineage_cache_file)
+  
+  setDT(lineage_cache)
+  lineage_cache[, TaxID := as.character(TaxID)]
+  
+} else {
+  lineage_cache <- data.table(
+    TaxID = character(),
+    Kingdom = character(),
+    Phylum = character(),
+    Class = character(),
+    Order = character(),
+    Family = character(),
+    Genus = character(),
+    Species = character()
+  )
+}
+
+msg(
+  "Loaded cache containing %s jobs",
+  format(nrow(cache), big.mark = ",")
+)
+
 msg("Fetching Wilderlab jobs/samples/taxa...")
 jobs <- tryCatch(fetch_wilder_safe("jobs", key = key, secret = secret, xapikey = xapikey), error = function(e) NULL)
 samples <- tryCatch(fetch_wilder_safe("samples", key = key, secret = secret, xapikey = xapikey), error = function(e) NULL)
@@ -148,6 +193,18 @@ if (is.null(jobs)) jobs <- data.table()
 
 setDT(samples); setDT(taxa); setDT(jobs)
 
+jobs[, JobID := as.character(JobID)]
+cache[, JobID := as.character(JobID)]
+
+jobs_to_fetch <- jobs[
+  !JobID %in% cache$JobID
+]
+
+msg(
+  "Found %s new jobs to fetch",
+  nrow(jobs_to_fetch)
+)
+
 # ensure samples from API have provenance and DOC flag
 if (nrow(samples) > 0) {
   samples[, Source := "DOC_API"]
@@ -158,27 +215,122 @@ if (nrow(samples) > 0) {
   samples[, Longitude := suppressWarnings(as.numeric(Longitude))]
 }
 
+# Build insect taxonomy database from Wilderlab taxa table
+
+tdb <- as.data.table(taxa)[, 1:4]
+
+setnames(
+  tdb,
+  c("taxID", "parent_taxID", "rank", "name")
+)
+
+tdb[, taxID := as.character(taxID)]
+tdb[, parent_taxID := as.character(parent_taxID)]
+tdb[, rank := tolower(rank)]
+
+msg(
+  "Built taxonomy database containing %s taxa",
+  format(nrow(tdb), big.mark = ",")
+)
+
 # ---------- 3) Fetch per-job records robustly ----------
+
 msg("Fetching per-job records...")
+
 records_list <- list()
-if (nrow(jobs) > 0) {
-  for (i in seq_len(nrow(jobs))) {
-    jid <- jobs$JobID[i]
-    df <- tryCatch(fetch_wilder_safe("records", JobID = jid, key = key, secret = secret, xapikey = xapikey),
-                   error = function(e) { warning("Job ", jid, " fetch failed: ", e$message); NULL })
+if (nrow(jobs_to_fetch) > 0) {
+  for (i in seq_len(nrow(jobs_to_fetch))) {
+    jid <- jobs_to_fetch$JobID[i]
+    df <- tryCatch(
+      fetch_wilder_safe(
+        "records",
+        JobID = jid,
+        key = key,
+        secret = secret,
+        xapikey = xapikey
+      ),
+      
+      error = function(e) {
+        warning(
+          "Job ",
+          jid,
+          " fetch failed: ",
+          e$message
+        )
+        NULL
+      }
+    )
+    
     if (!is.null(df)) {
       setDT(df)
       df[, Source := "DOC_API"]
       df[, DOC_Data := "Yes"]
-      # normalize types
-      if ("Count" %in% names(df)) df[, Count := suppressWarnings(as.numeric(Count))]
+      if ("Count" %in% names(df)) {
+        df[, Count := suppressWarnings(as.numeric(Count))]
+      }
       records_list[[length(records_list) + 1]] <- df
     }
-    if (i %% 50 == 0 && i > 0) msg("Fetched %d/%d jobs...", i, nrow(jobs))
+    
+    if (i %% 50 == 0) {
+      msg(
+        "Fetched %s/%s new jobs...",
+        format(i, big.mark = ","),
+        format(nrow(jobs_to_fetch), big.mark = ",")
+      )
+    }
   }
 }
 
-records_dt <- if (length(records_list) > 0) rbindlist(records_list, fill = TRUE, use.names = TRUE) else data.table()
+new_records_dt <- if (length(records_list) > 0) rbindlist(records_list, fill = TRUE, use.names = TRUE) else data.table()
+
+if (nrow(new_records_dt) > 0) {
+  
+  records_dt <- rbind(
+    records_dt,
+    new_records_dt,
+    fill = TRUE
+  )
+  
+  saveRDS(
+    records_dt,
+    records_cache_file
+  )
+  
+  msg(
+    "Saved %s total DOC records",
+    format(nrow(records_dt), big.mark = ",")
+  )
+  
+}
+
+# Update cache
+
+if (nrow(jobs_to_fetch) > 0) {
+  
+  cache <- rbind(
+    cache,
+    data.table(
+      JobID = jobs_to_fetch$JobID,
+      DateProcessed = Sys.Date()
+    ),
+    fill = TRUE
+  )
+  
+  cache <- unique(
+    cache,
+    by = "JobID"
+  )
+  
+  saveRDS(
+    cache,
+    cache_file
+  )
+  
+  msg(
+    "Cache updated: %s jobs stored",
+    format(nrow(cache), big.mark = ",")
+  )
+}
 
 # ---------- 4) Read public S3 CSVs ----------
 msg("Reading public S3 CSVs (samples, records)...")
@@ -281,53 +433,188 @@ if (length(missing_idx) > 0 && "UID" %in% names(all_samples)) {
 }
 msg("Sample metadata joined.")
 
-# ---------- 8) Taxonomy lineage merge (FIXED) ----------
-msg("Adding taxonomic lineages...")
+# ---------- 8) Taxonomy lineage merge ----------
+msg("Building taxonomy lineages from Wilderlab taxonomy tree...")
 
-unique_taxids <- unique(na.omit(all_records_dt$TaxID))
-
-if (length(unique_taxids) > 0) {
-  tryCatch({
-    lineages <- get_lineages(as.character(unique_taxids))
-    lineage_dt <- as.data.table(lineages)
-    
-    # Standardise column names to uppercase first letter
-    setnames(lineage_dt,
-             old = names(lineage_dt),
-             new = tools::toTitleCase(names(lineage_dt))
-    )
-    
-    lineage_dt[, TaxID := as.character(TaxID)]
-    all_records_dt[, TaxID := as.character(TaxID)]
-    
-    all_records_dt <- merge(
-      all_records_dt,
-      lineage_dt,
-      by = "TaxID",
-      all.x = TRUE,
-      sort = FALSE
-    )
-    
-    msg("Lineages merged successfully.")
-    
-  }, error = function(e) {
-    msg("Warning: Failed to retrieve lineages: %s", e$message)
-  })
-}
-
-if (!"Species" %in% names(all_records_dt)) {
-  if ("species" %in% names(all_records_dt)) {
-    setnames(all_records_dt, "species", "Species")
-  } else if ("Name" %in% names(all_records_dt) && "Rank" %in% names(all_records_dt)) {
-    all_records_dt[, Species := fifelse(
-      tolower(Rank) == "species",
-      as.character(Name),
-      NA_character_
-    )]
-  } else {
-    all_records_dt[, Species := NA_character_]
+build_lineage <- function(taxid, tdb) {
+  
+  if (is.na(taxid) || taxid == "") {
+    return(NULL)
   }
+  
+  taxid <- as.character(taxid)
+  
+  lineage <- list(
+    Kingdom = NA_character_,
+    Phylum  = NA_character_,
+    Class   = NA_character_,
+    Order   = NA_character_,
+    Family  = NA_character_,
+    Genus   = NA_character_,
+    Species = NA_character_
+  )
+  
+  current <- taxid
+  
+  while (!is.na(current) &&
+         current != "" &&
+         current != "0") {
+    
+    node <- tdb[taxID == current]
+    
+    if (nrow(node) == 0) {
+      break
+    }
+    
+    rank <- tolower(node$rank[1])
+    name <- as.character(node$name[1])
+    
+    if (rank %in% c("domain", "kingdom")) lineage$Kingdom <- name
+    if (rank == "phylum") lineage$Phylum <- name
+    if (rank == "class") lineage$Class <- name
+    if (rank == "order") lineage$Order <- name
+    if (rank == "family") lineage$Family <- name
+    if (rank == "genus") lineage$Genus <- name
+    if (rank == "species") lineage$Species <- name
+    
+    current <- node$parent_taxID[1]
+  }
+  
+  as.data.table(
+    c(
+      list(TaxID = taxid),
+      lineage
+    )
+  )
 }
+
+unique_taxids <- unique(
+  na.omit(
+    as.character(all_records_dt$TaxID)
+  )
+)
+
+msg(
+  "Building lineages for %s taxids...",
+  format(length(unique_taxids), big.mark = ",")
+)
+
+new_taxids <- setdiff(
+  unique_taxids,
+  as.character(lineage_cache$TaxID)
+)
+
+msg(
+  "Found %s uncached TaxIDs",
+  format(length(new_taxids), big.mark = ",")
+)
+
+if (length(new_taxids) > 0) {
+  
+  lineage_list <- lapply(
+    new_taxids,
+    build_lineage,
+    tdb = tdb
+  )
+  
+  new_lineage_dt <- rbindlist(
+    lineage_list,
+    fill = TRUE,
+    use.names = TRUE
+  )
+  
+  lineage_cache <- rbind(
+    lineage_cache,
+    new_lineage_dt,
+    fill = TRUE
+  )
+  
+  lineage_cache <- unique(
+    lineage_cache,
+    by = "TaxID"
+  )
+  
+  saveRDS(
+    lineage_cache,
+    lineage_cache_file
+  )
+  
+  msg(
+    "Lineage cache now contains %s TaxIDs",
+    format(nrow(lineage_cache), big.mark = ",")
+  )
+}
+
+lineage_dt <- lineage_cache[
+  TaxID %in% unique_taxids
+]
+
+all_records_dt[, TaxID := as.character(TaxID)]
+
+# Remove any existing taxonomy fields before merge
+tax_cols <- c(
+  "Kingdom",
+  "Phylum",
+  "Class",
+  "Order",
+  "Family",
+  "Genus",
+  "Species"
+)
+
+existing_tax_cols <- intersect(
+  names(all_records_dt),
+  tax_cols
+)
+
+if (length(existing_tax_cols) > 0) {
+  all_records_dt[, (existing_tax_cols) := NULL]
+}
+
+# Merge lineage data
+all_records_dt <- merge(
+  all_records_dt,
+  lineage_dt,
+  by = "TaxID",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+msg(
+  "Merged taxonomy for %s taxa",
+  format(nrow(lineage_dt), big.mark = ",")
+)
+
+# Handle Bacteria / Archaea domains
+
+all_records_dt[
+  is.na(Kingdom) & Group == "Bacteria",
+  Kingdom := "Bacteria"
+]
+
+all_records_dt[
+  is.na(Kingdom) & Group == "Archaea",
+  Kingdom := "Archaea"
+]
+
+# QA CHECK
+
+msg("Checking bacterial taxonomy completeness...")
+
+print(
+  all_records_dt[
+    Group == "Bacteria",
+    .(
+      Records = .N,
+      Phylum_Populated  = sum(!is.na(Phylum)  & Phylum  != ""),
+      Class_Populated   = sum(!is.na(Class)   & Class   != ""),
+      Order_Populated   = sum(!is.na(Order)   & Order   != ""),
+      Family_Populated  = sum(!is.na(Family)  & Family  != ""),
+      Genus_Populated   = sum(!is.na(Genus)   & Genus   != ""),
+      Species_Populated = sum(!is.na(Species) & Species != "")
+    )
+  ]
+)
 
 # ---------- 9) Fuzzy match (SAFE TAXON MERGE) ----------
 msg("Fuzzy matching Species names to NZTCS...")
@@ -425,6 +712,33 @@ if ("Class" %in% names(all_records_dt)) {
   ]
 }
 
+# ---------- Domain / Kingdom assignment from Group ----------
+
+if (!"Kingdom" %in% names(all_records_dt)) {
+  all_records_dt[, Kingdom := NA_character_]
+}
+
+# Explicitly handle prokaryotes
+all_records_dt[
+  Group == "Bacteria",
+  Kingdom := "Bacteria"
+]
+
+all_records_dt[
+  Group == "Archaea",
+  Kingdom := "Archaea"
+]
+
+all_records_dt[
+  Kingdom == "Viridiplantae",
+  Kingdom := "Plantae"
+]
+
+all_records_dt[
+  Kingdom == "Metazoa",
+  Kingdom := "Animalia"
+]
+
 # ---------- Kingdom assignment from Phylum ----------
 msg("Assigning kingdoms from phylum...")
 
@@ -439,47 +753,95 @@ animal_phyla <- c(
   "Nematoda","Porifera","Tardigrada","Nematomorpha",
   "Echinodermata","Chaetognatha","Onychophora",
   "Xenacoelomorpha","Entoprocta","Brachiopoda",
-  "Phoronida","Hemichordata","Acanthocephala"
+  "Phoronida","Hemichordata","Acanthocephala",
+  "Ctenophora"
 )
 
 # Plants
 plant_phyla <- c(
   "Tracheophyta","Bryophyta","Marchantiophyta",
   "Anthocerotophyta","Chlorophyta",
-  "Streptophyta","Prasinodermophyta"
+  "Streptophyta","Prasinodermophyta",
+  "Rhodophyta"
 )
 
 # Fungi
 fungal_phyla <- c(
-  "Ascomycota","Basidiomycota","Chytridiomycota",
-  "Olpidiomycota","Zoopagomycota",
-  "Blastocladiomycota","Sanchytriomycota",
-  "Cryptomycota","Mucoromycota","Microsporidia"
+  "Ascomycota",
+  "Basidiomycota",
+  "Chytridiomycota",
+  "Olpidiomycota",
+  "Zoopagomycota",
+  "Blastocladiomycota",
+  "Sanchytriomycota",
+  "Cryptomycota",
+  "Mucoromycota",
+  "Microsporidia",
+  "Entomophthoromycota",
+  "Aphelidiomycota",
+  "Rozellomycota",
+  "Glomeromycota",
+  "Kickxellomycota",
+  "Monoblepharomycota",
+  "Basidiobolomycota",
+  "Mortierellomycota",
+  "Calcarisporiellomycota",
+  "Neocallimastigomycota"
 )
 
 # Chromista
 chromista_phyla <- c(
-  "Bacillariophyta","Oomycota","Ochrophyta",
+  "Bacillariophyta",
+  "Oomycota",
+  "Ochrophyta",
   "Haptophyta"
 )
 
-# Protozoa / Protists
+# Protists
 protist_phyla <- c(
   "Ciliophora","Discosea","Tubulinea","Heterolobosea",
   "Euglenozoa","Evosea","Cercozoa","Endomyxa",
   "Apicomplexa","Picozoa","Parabasalia",
   "Foraminifera","Fornicata","Perkinsozoa",
   "Preaxostyla","Hemimastigophora","Malawimonada",
-  "Nibbleridia","Amoebozoa", "Telonemia"
+  "Nibbleridia","Amoebozoa","Telonemia"
 )
 
 # Assign Kingdoms
-all_records_dt[Phylum %in% animal_phyla, Kingdom := "Animalia"]
-all_records_dt[Phylum %in% plant_phyla, Kingdom := "Plantae"]
-all_records_dt[Phylum %in% fungal_phyla, Kingdom := "Fungi"]
-all_records_dt[Phylum %in% chromista_phyla, Kingdom := "Chromista"]
-all_records_dt[Phylum %in% protist_phyla, Kingdom := "Protista"]
+all_records_dt[
+  is.na(Kingdom) & Phylum %in% animal_phyla,
+  Kingdom := "Animalia"
+]
 
+all_records_dt[
+  is.na(Kingdom) & Phylum %in% plant_phyla,
+  Kingdom := "Plantae"
+]
+
+all_records_dt[
+  is.na(Kingdom) & Phylum %in% fungal_phyla,
+  Kingdom := "Fungi"
+]
+
+all_records_dt[
+  is.na(Kingdom) & Phylum %in% chromista_phyla,
+  Kingdom := "Chromista"
+]
+
+all_records_dt[
+  is.na(Kingdom) & Phylum %in% protist_phyla,
+  Kingdom := "Protista"
+]
+
+# Check for phyla that were not assigned a Kingdom
+unassigned <- sort(unique(all_records_dt[is.na(Kingdom), Phylum]))
+
+if (length(unassigned) > 0) {
+  msg("WARNING: Unassigned phyla:")
+  print(unassigned)
+} else {
+  msg("All phyla successfully assigned to a Kingdom.")
+}
 
 # ---------- 10) Spatial joins for Nga Awa & Regional Council ----------
 msg("Spatial joins for Nga Awa & Regional Council...")
@@ -693,4 +1055,3 @@ msg("Saving unversioned RDS -> ", unversioned)
 saveRDS(summary_df, unversioned)
 
 msg("Completed. Summary rows: %d", nrow(summary_df))
-View(summary_df)

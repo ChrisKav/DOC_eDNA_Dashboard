@@ -5,6 +5,7 @@ library(leaflet)
 library(sf)            # for spatial write
 library(dplyr)         # used in GPKG creation
 library(stringr)       # used to sanitize layer names
+library(DT)
 
 # Load and convert to data.table
 merged <- as.data.table(readRDS("Data/records.rds"))
@@ -58,7 +59,7 @@ ui <- fluidPage(
     ),
     mainPanel(
       h4("Filtered data preview"),
-      withSpinner(dataTableOutput("dataPreview"), type = 4, color = "#337ab7"),
+      withSpinner(DTOutput("dataPreview"), type = 4, color = "#337ab7"),
       hr(),
       h4("Map Preview"),
       leafletOutput("mapPreview", height = 500),
@@ -72,6 +73,15 @@ ui <- fluidPage(
 # Server
 server <- function(input, output, session) {
   observeEvent(input$resetFilters, {
+    
+    freezeReactiveValue(input, "Kingdom")
+    freezeReactiveValue(input, "Phylum")
+    freezeReactiveValue(input, "Class")
+    freezeReactiveValue(input, "Order")
+    freezeReactiveValue(input, "Family")
+    freezeReactiveValue(input, "Genus")
+    freezeReactiveValue(input, "Species")
+    
     updateSelectInput(session, "Kingdom", selected = "All")
     
     updateSelectInput(
@@ -80,11 +90,13 @@ server <- function(input, output, session) {
       choices = c("All", unique_sorted(merged$Phylum)),
       selected = "All"
     )
+    
     updateSelectInput(session, "Class", choices = "All", selected = "All")
     updateSelectInput(session, "Order", choices = "All", selected = "All")
     updateSelectInput(session, "Family", choices = "All", selected = "All")
     updateSelectInput(session, "Genus", choices = "All", selected = "All")
     updateSelectInput(session, "Species", choices = "All", selected = "All")
+    
     updateSelectInput(session, "Threat Status", selected = "All")
     updateSelectInput(session, "Threat Category", selected = "All")
     updateSelectInput(session, "Taxon Group", selected = "All")
@@ -195,7 +207,7 @@ server <- function(input, output, session) {
   filtered_data <- reactiveVal()
   
   get_filtered_data <- reactive({
-    dt <- copy(merged)
+    dt <- merged
     filters <- list(
       Kingdom = input$Kingdom,
       Phylum = input$Phylum,
@@ -227,9 +239,14 @@ server <- function(input, output, session) {
     filtered_data(get_filtered_data())
   })
   
-  output$dataPreview <- renderDataTable({
-    req(filtered_data())
-  })
+  output$dataPreview <- DT::renderDT(
+    filtered_data(),
+    options = list(
+      pageLength = 25,
+      scrollX = TRUE
+    ),
+    server = TRUE
+  )
   
   output$summaryPanel <- renderText({
     dt <- filtered_data()
@@ -252,6 +269,10 @@ Unique Sample Names:", sample_count
     if (!("Latitude" %in% names(dt)) || !("Longitude" %in% names(dt))) return(NULL)
     
     dt <- dt[!is.na(Latitude) & !is.na(Longitude)]
+    
+    if (nrow(dt) > 5000) {
+      dt <- dt[sample(.N, 5000)]
+    }
     
     leaflet(dt) %>%
       addTiles() %>%
